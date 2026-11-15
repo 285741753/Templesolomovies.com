@@ -1,0 +1,321 @@
+{
+  "entities": {
+    "PublicUserProfile": {
+      "title": "PublicUserProfile",
+      "description": "Non-PII public profile for a templesolosmovies.com member.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "favoriteGenre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "createdAt", "updatedAt"]
+    },
+    "PrivateAccount": {
+      "title": "PrivateAccount",
+      "description": "Strictly isolated PII record containing the member's account email.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "SavedMovie": {
+      "title": "SavedMovie",
+      "description": "A movie bookmarked to a member's personalized watchlist.",
+      "type": "object",
+      "properties": {
+        "movieId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "genre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "quality": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "year": {
+          "type": "number"
+        },
+        "posterUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["movieId", "userId", "title", "genre", "quality", "year", "posterUrl", "addedAt"]
+    },
+    "MovieRating": {
+      "title": "MovieRating",
+      "description": "A 1-to-5 star rating submitted by an authenticated user for a specific movie.",
+      "type": "object",
+      "properties": {
+        "ratingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "movieId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "rating": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ratingId", "movieId", "userId", "rating", "createdAt", "updatedAt"]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Authorized administrator record granting movie upload and catalog management privileges.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "grantedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "grantedAt"]
+    },
+    "ReleaseNotification": {
+      "title": "ReleaseNotification",
+      "description": "User subscription to be notified when an upcoming movie release drops.",
+      "type": "object",
+      "properties": {
+        "releaseId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "movieTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "releaseDate": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 32
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "subscribedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["releaseId", "userId", "movieTitle", "releaseDate", "email", "subscribedAt"]
+    },
+    "UpcomingMovie": {
+      "title": "UpcomingMovie",
+      "description": "Scheduled upcoming movie premiere displayed in the Coming Soon section.",
+      "type": "object",
+      "properties": {
+        "releaseId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "genre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "releaseDate": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 32
+        },
+        "duration": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "quality": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "director": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "synopsis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "posterUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": ["upcoming", "released"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "releaseId",
+        "title",
+        "genre",
+        "releaseDate",
+        "duration",
+        "quality",
+        "director",
+        "synopsis",
+        "posterUrl",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/public/profile": {
+      "schema": { "$ref": "#/entities/PublicUserProfile" },
+      "description": "Public display name and genre preference for a member."
+    },
+    "/users/{userId}/private/account": {
+      "schema": { "$ref": "#/entities/PrivateAccount" },
+      "description": "Isolated private email and account metadata readable only by the owner."
+    },
+    "/users/{userId}/savedMovies/{movieId}": {
+      "schema": { "$ref": "#/entities/SavedMovie" },
+      "description": "Personalized saved watchlist entries belonging to the member."
+    },
+    "/users/{userId}/releaseNotifications/{releaseId}": {
+      "schema": { "$ref": "#/entities/ReleaseNotification" },
+      "description": "Upcoming movie release notification subscriptions belonging to the member."
+    },
+    "/upcomingMovies/{releaseId}": {
+      "schema": { "$ref": "#/entities/UpcomingMovie" },
+      "description": "Admin-managed upcoming movie releases shown in the Coming Soon section."
+    },
+    "/movieRatings/{ratingId}": {
+      "schema": { "$ref": "#/entities/MovieRating" },
+      "description": "One 1-to-5 star rating per authenticated user per movie."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRole" },
+      "description": "Administrator registry for movie upload and management permissions."
+    }
+  }
+}

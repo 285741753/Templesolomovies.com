@@ -1,0 +1,6 @@
+{
+  "name": "templesolosmovies.com",
+  "description": "Upload, discover, and download movies with real-time community chat on templesolosmovies.com.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

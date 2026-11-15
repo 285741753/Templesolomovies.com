@@ -1,0 +1,282 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email_verified == true && request.auth.token.email == 'madubachigozie00@gmail.com')
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidPublicProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'favoriteGenre', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 40
+        && (!('favoriteGenre' in data) || (data.favoriteGenre is string && data.favoriteGenre.size() >= 1 && data.favoriteGenre.size() <= 32))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateAccount(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 160
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSavedMovie(data, userId, movieId) {
+      return data.keys().hasAll(['movieId', 'userId', 'title', 'genre', 'quality', 'year', 'posterUrl', 'addedAt'])
+        && data.keys().hasOnly(['movieId', 'userId', 'title', 'genre', 'quality', 'year', 'posterUrl', 'addedAt'])
+        && data.movieId is string
+        && data.movieId == movieId
+        && isValidId(data.movieId)
+        && data.userId is string
+        && data.userId == userId
+        && isValidId(data.userId)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 140
+        && data.genre is string
+        && data.genre.size() >= 1
+        && data.genre.size() <= 32
+        && data.quality is string
+        && data.quality.size() >= 1
+        && data.quality.size() <= 24
+        && data.year is number
+        && data.year >= 1900
+        && data.year <= 2035
+        && data.posterUrl is string
+        && data.posterUrl.size() >= 1
+        && data.posterUrl.size() <= 500
+        && data.addedAt is timestamp;
+    }
+
+    function isValidReleaseNotification(data, userId, releaseId) {
+      return data.keys().hasAll(['releaseId', 'userId', 'movieTitle', 'releaseDate', 'email', 'subscribedAt'])
+        && data.keys().hasOnly(['releaseId', 'userId', 'movieTitle', 'releaseDate', 'email', 'subscribedAt'])
+        && data.releaseId is string
+        && data.releaseId == releaseId
+        && isValidId(data.releaseId)
+        && data.userId is string
+        && data.userId == userId
+        && isValidId(data.userId)
+        && data.movieTitle is string
+        && data.movieTitle.size() >= 1
+        && data.movieTitle.size() <= 140
+        && data.releaseDate is string
+        && data.releaseDate.size() >= 4
+        && data.releaseDate.size() <= 32
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 160
+        && data.subscribedAt is timestamp;
+    }
+
+    function isValidUpcomingMovie(data, releaseId) {
+      return data.keys().hasAll(['releaseId', 'title', 'genre', 'releaseDate', 'duration', 'quality', 'director', 'synopsis', 'posterUrl', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['releaseId', 'title', 'genre', 'releaseDate', 'duration', 'quality', 'director', 'synopsis', 'posterUrl', 'status', 'createdAt', 'updatedAt'])
+        && data.releaseId is string
+        && data.releaseId == releaseId
+        && isValidId(data.releaseId)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 140
+        && data.genre is string
+        && data.genre.size() >= 1
+        && data.genre.size() <= 32
+        && data.releaseDate is string
+        && data.releaseDate.size() >= 4
+        && data.releaseDate.size() <= 32
+        && data.duration is string
+        && data.duration.size() >= 1
+        && data.duration.size() <= 24
+        && data.quality is string
+        && data.quality.size() >= 1
+        && data.quality.size() <= 24
+        && data.director is string
+        && data.director.size() >= 1
+        && data.director.size() <= 80
+        && data.synopsis is string
+        && data.synopsis.size() >= 1
+        && data.synopsis.size() <= 1000
+        && data.posterUrl is string
+        && data.posterUrl.size() >= 1
+        && data.posterUrl.size() <= 500
+        && data.status in ['upcoming', 'released']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMovieRating(data, ratingId) {
+      return data.keys().hasAll(['ratingId', 'movieId', 'userId', 'rating', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ratingId', 'movieId', 'userId', 'rating', 'createdAt', 'updatedAt'])
+        && data.ratingId is string
+        && data.ratingId == ratingId
+        && data.ratingId.size() >= 3
+        && data.ratingId.size() <= 256
+        && data.ratingId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.movieId is string
+        && isValidId(data.movieId)
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.ratingId == data.movieId + '__' + data.userId
+        && data.rating is int
+        && data.rating >= 1
+        && data.rating <= 5
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Public non-PII profile
+    match /users/{userId}/public/profile {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if (isOwner(userId) || isAdmin())
+        && isValidId(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'favoriteGenre', 'updatedAt']));
+      allow delete: if (isOwner(userId) || isAdmin()) && isValidId(userId);
+    }
+
+    // Strictly isolated private account (PII: email)
+    match /users/{userId}/private/account {
+      allow get: if (isOwner(userId) || isAdmin()) && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidPrivateAccount(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if (isOwner(userId) || isAdmin())
+        && isValidId(userId)
+        && isValidPrivateAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']));
+      allow delete: if (isOwner(userId) || isAdmin()) && isValidId(userId);
+    }
+
+    // Personalized saved watchlist per user
+    match /users/{userId}/savedMovies/{movieId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(movieId);
+      allow list: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(movieId)
+        && isValidSavedMovie(incoming(), userId, movieId)
+        && incoming().addedAt == request.time;
+      allow update: if false;
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(movieId);
+    }
+
+    // Owner-isolated release notification signups (contains user email PII)
+    match /users/{userId}/releaseNotifications/{releaseId} {
+      allow get: if (isOwner(userId) || isAdmin()) && isValidId(userId) && isValidId(releaseId);
+      allow list: if (isOwner(userId) || isAdmin()) && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(releaseId)
+        && isValidReleaseNotification(incoming(), userId, releaseId)
+        && incoming().subscribedAt == request.time;
+      allow update: if false;
+      allow delete: if (isOwner(userId) || isAdmin()) && isValidId(userId) && isValidId(releaseId);
+    }
+
+    // Upcoming movie premieres (public non-PII catalog, admin-managed writes)
+    match /upcomingMovies/{releaseId} {
+      allow get: if isValidId(releaseId);
+      allow list: if resource.data.status in ['upcoming', 'released'];
+      allow create: if isAdmin()
+        && isValidId(releaseId)
+        && isValidUpcomingMovie(incoming(), releaseId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(releaseId)
+        && isValidUpcomingMovie(incoming(), releaseId)
+        && incoming().releaseId == existing().releaseId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(releaseId);
+    }
+
+    // Public non-PII 5-star movie ratings (write strictly restricted to authenticated owner)
+    match /movieRatings/{ratingId} {
+      allow get: if ratingId is string && ratingId.size() <= 256 && ratingId.matches('^[a-zA-Z0-9_\\-]+$');
+      allow list: if resource.data.rating >= 1 && resource.data.rating <= 5;
+      allow create: if isSignedIn()
+        && isValidMovieRating(incoming(), ratingId)
+        && isOwner(incoming().userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && (isOwner(existing().userId) || isAdmin())
+        && isValidMovieRating(incoming(), ratingId)
+        && incoming().userId == existing().userId
+        && incoming().movieId == existing().movieId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'updatedAt']));
+      allow delete: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
+    }
+
+    // Admin role registry (non-self-assignable; only readable by owner/admin, writable by admin)
+    match /admins/{userId} {
+      allow get: if (isOwner(userId) || isAdmin()) && isValidId(userId);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(userId)
+        && incoming().keys().hasAll(['uid', 'email', 'grantedAt'])
+        && incoming().keys().hasOnly(['uid', 'email', 'grantedAt'])
+        && incoming().uid == userId
+        && incoming().email is string && incoming().email.size() >= 3 && incoming().email.size() <= 160
+        && incoming().grantedAt == request.time;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+  }
+}
