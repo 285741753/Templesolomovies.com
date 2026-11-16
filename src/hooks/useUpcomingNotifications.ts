@@ -33,6 +33,19 @@ function loadGuestEmail(): string {
   }
 }
 
+const UPCOMING_CACHE_KEY = 'tsm_cached_upcoming_v1';
+
+function loadCachedUpcoming(): UpcomingMovie[] {
+  try {
+    const raw = localStorage.getItem(UPCOMING_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as UpcomingMovie[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function isValidNotificationEmail(email: string): boolean {
   return EMAIL_REGEX.test(email.trim());
 }
@@ -46,28 +59,37 @@ export function useUpcomingNotifications({
   authReady: boolean;
   getIdToken: () => Promise<string | null>;
 }) {
-  const [upcomingMovies, setUpcomingMovies] = useState<UpcomingMovie[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [upcomingMovies, setUpcomingMovies] = useState<UpcomingMovie[]>(() => loadCachedUpcoming());
+  const [isLoading, setIsLoading] = useState(() => loadCachedUpcoming().length === 0);
   const [error, setError] = useState<string | null>(null);
   const [firestoreSubIds, setFirestoreSubIds] = useState<string[]>([]);
   const [guestSubIds, setGuestSubIds] = useState<string[]>(() => loadGuestSubs());
   const [savedEmail, setSavedEmail] = useState<string>(() => loadGuestEmail());
 
   const fetchUpcoming = useCallback(async () => {
-    setIsLoading(true);
     setError(null);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 7000);
     try {
-      const resp = await fetch('/api/upcoming');
+      const resp = await fetch('/api/upcoming', { signal: controller.signal });
       if (!resp.ok) {
         throw new Error('Could not load upcoming releases.');
       }
       const data = (await resp.json()) as { upcoming?: UpcomingMovie[] };
       if (Array.isArray(data.upcoming)) {
         setUpcomingMovies(data.upcoming);
+        try {
+          localStorage.setItem(UPCOMING_CACHE_KEY, JSON.stringify(data.upcoming));
+        } catch {
+          // Ignore storage quota issues
+        }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load upcoming releases.');
+      if (loadCachedUpcoming().length === 0) {
+        setError(err instanceof Error ? err.message : 'Failed to load upcoming releases.');
+      }
     } finally {
+      window.clearTimeout(timer);
       setIsLoading(false);
     }
   }, []);

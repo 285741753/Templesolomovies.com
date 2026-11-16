@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import {
   LogOut,
   Upload,
@@ -11,19 +11,27 @@ import {
   Check,
   BarChart3,
   Archive,
+  Tv,
+  MessageCircle,
+  ExternalLink,
+  Settings,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { LANGUAGES, useLanguage } from '../contexts/LanguageContext';
+import { WHATSAPP_CHANNEL_URL } from '../types/cinema';
 import { PWAInstallButton } from './PWAInstallButton';
 import type { UserWatchStats } from './MyStatsModal';
 
 interface HeaderProps {
   searchQuery: string;
+  searchInputRef?: RefObject<HTMLInputElement | null>;
   userStats: UserWatchStats;
   onSearchChange: (query: string) => void;
   onOpenUpload: () => void;
   onOpenAuth: (mode: 'login' | 'signup') => void;
   onOpenStats: () => void;
+  onOpenSettings: () => void;
+  onOpenWatchParty: () => void;
   onScrollToChat: () => void;
   onSelectCollection: (view: 'all' | 'saved' | 'uploads') => void;
   onLoggedOut: () => void;
@@ -31,11 +39,14 @@ interface HeaderProps {
 
 export function Header({
   searchQuery,
+  searchInputRef,
   userStats,
   onSearchChange,
   onOpenUpload,
   onOpenAuth,
   onOpenStats,
+  onOpenSettings,
+  onOpenWatchParty,
   onScrollToChat,
   onSelectCollection,
   onLoggedOut,
@@ -102,24 +113,24 @@ export function Header({
 
   return (
     <header className="sticky top-0 z-40 border-b border-[#27272A] bg-[#09090B]/95 backdrop-blur-md">
-      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-4 lg:gap-6 px-4 py-3 sm:px-6 lg:px-8">
-        {/* Zone 1: Brand Wordmark with Temple Cinema App Icon */}
+      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 sm:gap-5 px-4 py-3 sm:px-6 lg:px-8">
+        {/* Zone 1: Full HD Temple Cinema Icon & Gold Wordmark */}
         <a
           href="#spotlight"
-          className="flex items-center gap-2.5 text-base sm:text-lg font-semibold tracking-tight text-[#FAFAFA] whitespace-nowrap shrink-0 font-display focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E5A93B]"
+          className="flex items-center gap-2.5 text-sm sm:text-base font-bold tracking-[0.14em] uppercase text-[#E5A93B] whitespace-nowrap shrink-0 font-display focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E5A93B]"
         >
           <img
-            src="/app-icon.jpg"
+            src="/app-icon-full.png"
             alt="Temple Cinema icon"
-            className="h-8 w-8 rounded-lg object-cover border border-[#27272A] shrink-0"
+            className="h-9 w-9 rounded-lg object-cover border border-[#E5A93B]/35 shrink-0"
           />
-          <span className="hidden sm:inline">templesolosmovies.com</span>
+          <span>{t('templeBrand')}</span>
         </a>
 
         {/* Zone 2: Single-line Nav Links */}
         <nav
           aria-label="Primary navigation"
-          className="hidden lg:flex items-center gap-5 text-sm font-medium text-[#A1A1AA]"
+          className="hidden xl:flex items-center gap-4 text-xs font-medium text-[#A1A1AA]"
         >
           <a
             href="#trending-now"
@@ -163,33 +174,75 @@ export function Header({
           >
             {t('navChat')}
           </button>
+          <a
+            href="#chess-game"
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          >
+            {t('navChess')}
+          </a>
+          <a
+            href="#ai-studio"
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          >
+            {t('navStudio')}
+          </a>
+          <a
+            href="#stage-3d"
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          >
+            {t('navStage3d')}
+          </a>
+          <a
+            href="#cinema-map"
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          >
+            {t('navMap')}
+          </a>
+          <button
+            type="button"
+            onClick={onOpenWatchParty}
+            className="inline-flex items-center gap-1.5 text-[#E5A93B] hover:text-[#F0B84F] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Tv className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{t('navWatchParty')}</span>
+          </button>
+          <a
+            href={WHATSAPP_CHANNEL_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap shrink-0"
+          >
+            <MessageCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{t('whatsappChannel')}</span>
+          </a>
         </nav>
 
-        {/* Global Real-Time Search Bar */}
+        {/* Global Pill Search Bar */}
         <form
           onSubmit={handleSearchSubmit}
           role="search"
           aria-label="Global movie search"
-          className="relative flex-1 max-w-xs xl:max-w-sm"
+          className="relative flex-1 max-w-[200px] sm:max-w-xs lg:max-w-sm"
         >
           <Search
-            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#71717A]"
+            className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#A1A1AA]"
             aria-hidden="true"
           />
           <input
+            ref={searchInputRef}
             type="search"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder={t('searchPlaceholder')}
-            aria-label={t('searchPlaceholder')}
-            className="w-full rounded-lg border border-[#27272A] bg-[#111114] py-2 pl-9 pr-8 text-xs sm:text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none transition-colors"
+            placeholder={t('searchMoviesPlaceholder')}
+            aria-label={t('searchMoviesPlaceholder')}
+            className="w-full rounded-full border border-[#3F3F46] bg-[#141418] py-2 pl-10 pr-8 text-xs sm:text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none transition-colors"
           />
           {searchQuery && (
             <button
               type="button"
               onClick={() => onSearchChange('')}
               aria-label={t('clearSearch')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-[#71717A] hover:text-[#FAFAFA] cursor-pointer"
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded p-0.5 text-[#71717A] hover:text-[#FAFAFA] cursor-pointer"
             >
               <X className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
@@ -252,6 +305,21 @@ export function Header({
             )}
           </div>
 
+          <button
+            type="button"
+            onClick={() => {
+              setLangMenuOpen(false);
+              setMenuOpen(false);
+              onOpenSettings();
+            }}
+            aria-label={t('settingsTitle')}
+            title={t('settingsTitle')}
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#111114] px-2.5 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Settings className="h-3.5 w-3.5 text-[#E5A93B] shrink-0" aria-hidden="true" />
+            <span className="hidden md:inline">{t('settingsTitle')}</span>
+          </button>
+
           <PWAInstallButton />
 
           <div className="relative" ref={menuRef}>
@@ -310,6 +378,18 @@ export function Header({
                     </p>
                   </button>
 
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onOpenSettings();
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium text-[#FAFAFA] hover:bg-[#18181B] cursor-pointer"
+                  >
+                    <Settings className="h-3.5 w-3.5 text-[#E5A93B]" aria-hidden="true" />
+                    <span>{t('settingsTitle')}</span>
+                  </button>
+
                   {isAdmin && (
                     <>
                       <button
@@ -345,6 +425,20 @@ export function Header({
                       </a>
                     </>
                   )}
+
+                  <a
+                    href={WHATSAPP_CHANNEL_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setMenuOpen(false)}
+                    className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-xs font-medium text-emerald-300 hover:bg-[#18181B]"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <MessageCircle className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                      <span>{t('joinWhatsappChannel')}</span>
+                    </span>
+                    <ExternalLink className="h-3 w-3 text-[#71717A]" aria-hidden="true" />
+                  </a>
 
                   <button
                     type="button"

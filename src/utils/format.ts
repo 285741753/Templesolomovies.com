@@ -26,9 +26,23 @@ export function formatDurationSeconds(totalSeconds: number): string {
   return `0m ${Math.max(1, secs)}s`;
 }
 
-export function triggerMovieDownload(movieId: string): void {
+export function formatPlaybackTime(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return '0:00';
+  const clamped = Math.floor(totalSeconds);
+  const hours = Math.floor(clamped / 3600);
+  const mins = Math.floor((clamped % 3600) / 60);
+  const secs = clamped % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (hours > 0) {
+    return `${hours}:${pad(mins)}:${pad(secs)}`;
+  }
+  return `${mins}:${pad(secs)}`;
+}
+
+export function triggerMovieDownload(movieId: string, quality?: string): void {
   const link = document.createElement('a');
-  link.href = `/api/movies/${encodeURIComponent(movieId)}/download`;
+  const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
+  link.href = `/api/movies/${encodeURIComponent(movieId)}/download${query}`;
   link.download = '';
   document.body.appendChild(link);
   link.click();

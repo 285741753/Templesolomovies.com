@@ -13,6 +13,7 @@ export default defineConfig(() => {
         registerType: 'autoUpdate',
         includeAssets: [
           'app-icon.jpg',
+          'app-icon-full.png',
           'apple-touch-icon.png',
           'pwa-192x192.png',
           'pwa-512x512.png',
@@ -20,8 +21,8 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'templesolosmovies.com',
-          short_name: 'TempleMovies',
+          name: 'Temple Cinema — templesolosmovies.com',
+          short_name: 'TempleCinema',
           description:
             'Stream previews, download movies, save your watchlist, and chat live on templesolosmovies.com.',
           theme_color: '#09090B',
@@ -43,6 +44,12 @@ export default defineConfig(() => {
               purpose: 'any',
             },
             {
+              src: '/app-icon-full.png',
+              sizes: '1080x1080',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
               src: '/pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
@@ -55,6 +62,35 @@ export default defineConfig(() => {
           globPatterns: ['**/*.{js,css,html,ico,png,jpg,svg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//, /^\/storage\//, /^\/ws/],
           runtimeCaching: [
+            {
+              urlPattern: /\/api\/(movies|upcoming)$/i,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'cinema-api-catalog-cache',
+                networkTimeoutSeconds: 3,
+                expiration: {
+                  maxEntries: 12,
+                  maxAgeSeconds: 60 * 60 * 24,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /\/storage\/posters\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'cinema-posters-cache',
+                expiration: {
+                  maxEntries: 120,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',
@@ -91,6 +127,26 @@ export default defineConfig(() => {
         },
       }),
     ],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (id.includes('node_modules/three')) return 'vendor-three';
+            if (id.includes('node_modules/firebase') || id.includes('node_modules/@firebase')) {
+              return 'vendor-firebase';
+            }
+            if (
+              id.includes('node_modules/react/') ||
+              id.includes('node_modules/react-dom/') ||
+              id.includes('node_modules/scheduler/')
+            ) {
+              return 'vendor-react';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),

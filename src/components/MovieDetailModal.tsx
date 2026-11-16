@@ -1,21 +1,46 @@
-import { useEffect, useState } from 'react';
-import { Bookmark, Check, Download, Edit3, MessageSquare, Share2, Star, Trash2, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Bookmark, Check, Download, Edit3, MessageSquare, RotateCcw, Share2, Star, Trash2, Tv, X } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { MovieRatingSummary } from '../hooks/useMovieRatings';
-import type { Movie, MovieGenre, MovieQuality } from '../types/cinema';
-import { formatFileSize } from '../utils/format';
+import type { SubmitReviewInput } from '../hooks/useMovieReviews';
+import type {
+  DownloadQualitySetting,
+  Movie,
+  MovieGenre,
+  MovieQuality,
+  MovieReview,
+  VideoQualitySetting,
+  WatchProgressEntry,
+} from '../types/cinema';
+import { formatFileSize, formatPlaybackTime } from '../utils/format';
+import { MovieReviewsSection } from './MovieReviewsSection';
 
 interface MovieDetailModalProps {
   movie: Movie | null;
   isSaved: boolean;
   canManage: boolean;
   isAuthenticated: boolean;
+  isAdmin: boolean;
+  currentUserId?: string;
+  currentAuthorName: string;
   ratingSummary?: MovieRatingSummary;
+  reviews: MovieReview[];
+  isLoadingReviews: boolean;
+  savedProgress?: WatchProgressEntry;
+  isLowNetwork?: boolean;
+  videoQuality?: VideoQualitySetting;
+  downloadQuality?: DownloadQualitySetting;
+  onSaveProgress?: (movieId: string, progressSeconds: number, durationSeconds: number) => void;
+  onClearProgress?: (movieId: string) => void;
   onClose: () => void;
   onDownload: (movie: Movie) => void;
   onShareToChat: (movie: Movie) => void;
+  onStartWatchParty?: (movie: Movie) => void;
   onToggleSave: (movie: Movie) => void;
   onRateMovie: (movieId: string, stars: number) => Promise<void>;
+  onSubmitReview: (input: SubmitReviewInput) => Promise<void>;
+  onDeleteReview: (movieId: string, targetUserId?: string) => Promise<void>;
+  onRequireAuthForReview: () => void;
   onMoviePlayed?: (movieId: string) => void;
   onShareSuccess?: (message: string) => void;
   onUpdate: (
@@ -25,6 +50,7 @@ interface MovieDetailModalProps {
       genre: MovieGenre;
       quality: MovieQuality;
       director: string;
+      imdbRating?: number;
       synopsis: string;
     }
   ) => Promise<void>;
@@ -33,9 +59,10 @@ interface MovieDetailModalProps {
 
 const GENRES: MovieGenre[] = [
   'Action',
+  'Nollywood',
+  'Sci-Fi',
   'Drama',
   'Thriller',
-  'Sci-Fi',
   'Comedy',
   'Mystery',
   'Documentary',
@@ -50,12 +77,27 @@ export function MovieDetailModal({
   isSaved,
   canManage,
   isAuthenticated,
+  isAdmin,
+  currentUserId,
+  currentAuthorName,
   ratingSummary,
+  reviews,
+  isLoadingReviews,
+  savedProgress,
+  isLowNetwork = false,
+  videoQuality = 'auto',
+  downloadQuality = '480p',
+  onSaveProgress,
+  onClearProgress,
   onClose,
   onDownload,
   onShareToChat,
+  onStartWatchParty,
   onToggleSave,
   onRateMovie,
+  onSubmitReview,
+  onDeleteReview,
+  onRequireAuthForReview,
   onMoviePlayed,
   onShareSuccess,
   onUpdate,
@@ -74,7 +116,34 @@ export function MovieDetailModal({
   const [editGenre, setEditGenre] = useState<MovieGenre>('Drama');
   const [editQuality, setEditQuality] = useState<MovieQuality>('1080p HD');
   const [editDirector, setEditDirector] = useState('');
+  const [editImdbRating, setEditImdbRating] = useState('7.8');
   const [editSynopsis, setEditSynopsis] = useState('');
+  const [resumedFromSeconds, setResumedFromSeconds] = useState(0);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hasRestoredInitialSeekRef = useRef(false);
+  const lastSavedWallMsRef = useRef(0);
+  const latestPlaybackRef = useRef<{ movieId: string; time: number; duration: number } | null>(null);
+
+  const flushPlaybackProgress = useCallback(() => {
+    const video = videoRef.current;
+    if (video && movie && Number.isFinite(video.duration) && video.duration > 0) {
+      if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
+        return;
+      }
+      onSaveProgress?.(movie.id, video.currentTime, video.duration);
+      return;
+    }
+    const latest = latestPlaybackRef.current;
+    if (latest && latest.duration > 0) {
+      onSaveProgress?.(latest.movieId, latest.time, latest.duration);
+    }
+  }, [movie, onSaveProgress, savedProgress]);
+
+  const handleRequestClose = useCallback(() => {
+    flushPlaybackProgress();
+    onClose();
+  }, [flushPlaybackProgress, onClose]);
 
   useEffect(() => {
     setConfirmDelete(false);
@@ -83,23 +152,39 @@ export function MovieDetailModal({
     setHoveredStar(0);
     setIsSubmittingRating(false);
     setLinkCopied(false);
+    hasRestoredInitialSeekRef.current = false;
+    lastSavedWallMsRef.current = 0;
+    latestPlaybackRef.current = null;
+    setResumedFromSeconds(savedProgress?.progressSeconds ?? 0);
     if (movie) {
       setEditTitle(movie.title);
       setEditGenre(movie.genre);
       setEditQuality(movie.quality);
       setEditDirector(movie.director);
+      setEditImdbRating((movie.imdbRating ?? 7.8).toFixed(1));
       setEditSynopsis(movie.synopsis);
     }
-  }, [movie]);
+  }, [movie?.id]);
 
   useEffect(() => {
     if (!movie) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') handleRequestClose();
+    };
+    const handleBeforeUnload = () => {
+      flushPlaybackProgress();
     };
     window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [movie, onClose]);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('keydown', handleKey);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      const latest = latestPlaybackRef.current;
+      if (latest && latest.duration > 0) {
+        onSaveProgress?.(latest.movieId, latest.time, latest.duration);
+      }
+    };
+  }, [movie?.id, handleRequestClose, flushPlaybackProgress, onSaveProgress]);
 
   if (!movie) return null;
 
@@ -114,11 +199,15 @@ export function MovieDetailModal({
     e.preventDefault();
     if (!editTitle.trim()) return;
     setIsSavingEdit(true);
+    const parsedImdb = Number(editImdbRating);
     await onUpdate(movie.id, {
       title: editTitle.trim(),
       genre: editGenre,
       quality: editQuality,
       director: editDirector.trim() || movie.director,
+      imdbRating: Number.isFinite(parsedImdb)
+        ? Math.round(Math.min(10, Math.max(1, parsedImdb)) * 10) / 10
+        : movie.imdbRating,
       synopsis: editSynopsis.trim() || movie.synopsis,
     });
     setIsSavingEdit(false);
@@ -143,13 +232,15 @@ export function MovieDetailModal({
               {movie.title}
             </h2>
             <p className="text-xs text-[#A1A1AA] font-mono tabular-nums mt-0.5">
-              {movie.genre} · {movie.year} · {movie.duration} · {movie.quality}
+              {movie.genre} · {movie.year} · {movie.duration} · {movie.quality} · IMDb{' '}
+              {(movie.imdbRating ?? 7.8).toFixed(1)} · Stream:{' '}
+              {videoQuality === 'auto' ? t('settingsAutoOption') : videoQuality}
             </p>
           </div>
 
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleRequestClose}
             aria-label="Close movie preview"
             className="rounded-lg p-2 text-[#A1A1AA] hover:bg-[#18181B] hover:text-[#FAFAFA] cursor-pointer"
           >
@@ -160,15 +251,103 @@ export function MovieDetailModal({
         {/* Video Stream Player */}
         <div className="bg-[#09090B] border-b border-[#27272A]">
           <video
+            ref={videoRef}
             key={movie.videoUrl}
             src={movie.videoUrl}
             poster={movie.backdropUrl || movie.posterUrl}
             controls
             playsInline
-            preload="metadata"
+            preload={isLowNetwork || videoQuality === '360p' ? 'none' : 'metadata'}
+            onLoadedMetadata={() => {
+              const video = videoRef.current;
+              if (!video) return;
+              if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
+                const safeDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : savedProgress.durationSeconds;
+                const target = Math.min(savedProgress.progressSeconds, Math.max(0, safeDuration - 0.5));
+                if (target > 0) {
+                  video.currentTime = target;
+                  setResumedFromSeconds(target);
+                }
+              }
+              hasRestoredInitialSeekRef.current = true;
+            }}
             onPlay={() => onMoviePlayed?.(movie.id)}
+            onTimeUpdate={() => {
+              const video = videoRef.current;
+              if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+              if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
+                return;
+              }
+              latestPlaybackRef.current = {
+                movieId: movie.id,
+                time: video.currentTime,
+                duration: video.duration,
+              };
+              const now = Date.now();
+              if (now - lastSavedWallMsRef.current >= 2000) {
+                lastSavedWallMsRef.current = now;
+                onSaveProgress?.(movie.id, video.currentTime, video.duration);
+              }
+            }}
+            onPause={() => {
+              const video = videoRef.current;
+              if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+              if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
+                return;
+              }
+              latestPlaybackRef.current = {
+                movieId: movie.id,
+                time: video.currentTime,
+                duration: video.duration,
+              };
+              lastSavedWallMsRef.current = Date.now();
+              onSaveProgress?.(movie.id, video.currentTime, video.duration);
+            }}
+            onSeeked={() => {
+              const video = videoRef.current;
+              if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+              if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
+                return;
+              }
+              latestPlaybackRef.current = {
+                movieId: movie.id,
+                time: video.currentTime,
+                duration: video.duration,
+              };
+              lastSavedWallMsRef.current = Date.now();
+              onSaveProgress?.(movie.id, video.currentTime, video.duration);
+            }}
+            onEnded={() => {
+              latestPlaybackRef.current = null;
+              setResumedFromSeconds(0);
+              onClearProgress?.(movie.id);
+            }}
             className="w-full aspect-video max-h-[420px] object-contain bg-black"
           />
+
+          {resumedFromSeconds > 0 && (
+            <div className="flex items-center justify-between gap-3 border-t border-[#27272A]/80 bg-[#111114] px-4 py-2 text-xs">
+              <span className="font-mono tabular-nums text-[#E5A93B]">
+                {t('resumedFrom')} {formatPlaybackTime(resumedFromSeconds)}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const video = videoRef.current;
+                  if (video) {
+                    video.currentTime = 0;
+                  }
+                  latestPlaybackRef.current = null;
+                  setResumedFromSeconds(0);
+                  onClearProgress?.(movie.id);
+                }}
+                className="inline-flex items-center gap-1 text-[#A1A1AA] hover:text-[#FAFAFA] transition-colors cursor-pointer"
+              >
+                <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                <span>{t('startFromBeginning')}</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Movie Details / Inline Owner Edit Form */}
@@ -201,7 +380,7 @@ export function MovieDetailModal({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-[#D4D4D8] mb-1">
                     Genre
@@ -233,6 +412,20 @@ export function MovieDetailModal({
                       </option>
                     ))}
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[#D4D4D8] mb-1">
+                    IMDb Rating
+                  </label>
+                  <input
+                    type="number"
+                    min={1.0}
+                    max={10.0}
+                    step={0.1}
+                    value={editImdbRating}
+                    onChange={(e) => setEditImdbRating(e.target.value)}
+                    className="w-full rounded-lg border border-[#27272A] bg-[#111114] px-3 py-2 text-sm font-mono tabular-nums text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none"
+                  />
                 </div>
               </div>
 
@@ -372,7 +565,9 @@ export function MovieDetailModal({
                 className="inline-flex items-center gap-2 rounded-lg bg-[#E5A93B] px-5 py-2.5 text-sm font-semibold text-[#09090B] hover:bg-[#F0B84F] cursor-pointer"
               >
                 <Download className="h-4 w-4" aria-hidden="true" />
-                <span>Download ({movie.fileName})</span>
+                <span>
+                  Download · {downloadQuality} ({movie.fileName})
+                </span>
               </button>
 
               <button
@@ -402,6 +597,20 @@ export function MovieDetailModal({
                 <MessageSquare className="h-4 w-4" aria-hidden="true" />
                 <span>Share in Chat</span>
               </button>
+
+              {onStartWatchParty && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onStartWatchParty(movie);
+                    onClose();
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[#E5A93B]/50 bg-[#E5A93B]/10 px-4 py-2.5 text-sm font-medium text-[#E5A93B] hover:bg-[#E5A93B]/20 cursor-pointer"
+                >
+                  <Tv className="h-4 w-4" aria-hidden="true" />
+                  <span>{t('navWatchParty')}</span>
+                </button>
+              )}
 
               <button
                 type="button"
@@ -502,6 +711,21 @@ export function MovieDetailModal({
               </div>
             )}
           </div>
+
+          <MovieReviewsSection
+            movieId={movie.id}
+            movieTitle={movie.title}
+            reviews={reviews}
+            ratingSummary={ratingSummary}
+            isAuthenticated={isAuthenticated}
+            isAdmin={isAdmin}
+            currentUserId={currentUserId}
+            currentAuthorName={currentAuthorName}
+            isLoadingReviews={isLoadingReviews}
+            onRequireAuth={onRequireAuthForReview}
+            onSubmitReview={onSubmitReview}
+            onDeleteReview={onDeleteReview}
+          />
         </div>
       </div>
     </div>

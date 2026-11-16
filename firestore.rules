@@ -164,6 +164,71 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidMovieReview(data, reviewId) {
+      return data.keys().hasAll(['reviewId', 'movieId', 'userId', 'authorName', 'rating', 'headline', 'body', 'containsSpoilers', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['reviewId', 'movieId', 'userId', 'authorName', 'rating', 'headline', 'body', 'containsSpoilers', 'createdAt', 'updatedAt'])
+        && data.reviewId is string
+        && data.reviewId == reviewId
+        && data.reviewId.size() >= 3
+        && data.reviewId.size() <= 256
+        && data.reviewId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.movieId is string
+        && isValidId(data.movieId)
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.reviewId == data.movieId + '__' + data.userId
+        && data.authorName is string
+        && data.authorName.size() >= 1
+        && data.authorName.size() <= 40
+        && data.rating is int
+        && data.rating >= 1
+        && data.rating <= 5
+        && data.headline is string
+        && data.headline.size() >= 3
+        && data.headline.size() <= 120
+        && data.body is string
+        && data.body.size() >= 20
+        && data.body.size() <= 2000
+        && data.containsSpoilers is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWatchProgress(data, userId, movieId) {
+      return data.keys().hasAll(['movieId', 'userId', 'progressSeconds', 'durationSeconds', 'updatedAt'])
+        && data.keys().hasOnly(['movieId', 'userId', 'progressSeconds', 'durationSeconds', 'updatedAt'])
+        && data.movieId is string
+        && data.movieId == movieId
+        && isValidId(data.movieId)
+        && data.userId is string
+        && data.userId == userId
+        && isValidId(data.userId)
+        && data.progressSeconds is number
+        && data.progressSeconds >= 0
+        && data.progressSeconds <= 86400
+        && data.durationSeconds is number
+        && data.durationSeconds >= 0
+        && data.durationSeconds <= 86400
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserSettings(data, userId) {
+      return data.keys().hasAll(['userId', 'videoQuality', 'downloadQuality', 'downloadWifiOnly', 'notificationsEnabled', 'language', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'videoQuality', 'downloadQuality', 'downloadWifiOnly', 'notificationsEnabled', 'language', 'updatedAt'])
+        && data.userId is string
+        && data.userId == userId
+        && isValidId(data.userId)
+        && data.videoQuality is string
+        && data.videoQuality in ['auto', '360p', '480p', '720p', '1080p']
+        && data.downloadQuality is string
+        && data.downloadQuality in ['360p', '480p', '720p', '1080p']
+        && data.downloadWifiOnly is bool
+        && data.notificationsEnabled is bool
+        && data.language is string
+        && data.language in ['en', 'es', 'fr', 'de', 'pt']
+        && data.updatedAt is timestamp;
+    }
+
     // Public non-PII profile
     match /users/{userId}/public/profile {
       allow get: if isSignedIn() && isValidId(userId);
@@ -211,6 +276,51 @@ service cloud.firestore {
         && incoming().addedAt == request.time;
       allow update: if false;
       allow delete: if isOwner(userId) && isValidId(userId) && isValidId(movieId);
+    }
+
+    // Per-movie playback progress timestamps for Continue Watching
+    match /users/{userId}/watchProgress/{movieId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(movieId);
+      allow list: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(movieId)
+        && isValidWatchProgress(incoming(), userId, movieId)
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidId(movieId)
+        && isValidWatchProgress(incoming(), userId, movieId)
+        && incoming().movieId == existing().movieId
+        && incoming().userId == existing().userId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['progressSeconds', 'durationSeconds', 'updatedAt']);
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(movieId);
+    }
+
+    // Member app settings (video/download quality, Wi-Fi-only downloads, notifications, language)
+    match /users/{userId}/settings/{settingId} {
+      allow get: if isOwner(userId) && isValidId(userId) && settingId == 'preferences';
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && settingId == 'preferences'
+        && isValidUserSettings(incoming(), userId)
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && settingId == 'preferences'
+        && isValidUserSettings(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'videoQuality',
+          'downloadQuality',
+          'downloadWifiOnly',
+          'notificationsEnabled',
+          'language',
+          'updatedAt'
+        ]);
+      allow delete: if isOwner(userId) && isValidId(userId) && settingId == 'preferences';
     }
 
     // Owner-isolated release notification signups (contains user email PII)
@@ -261,6 +371,27 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'updatedAt']));
+      allow delete: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
+    }
+
+    // Public non-PII formal movie reviews (one review per authenticated user per movie)
+    match /movieReviews/{reviewId} {
+      allow get: if reviewId is string && reviewId.size() >= 3 && reviewId.size() <= 256 && reviewId.matches('^[a-zA-Z0-9_\\-]+$');
+      allow list: if resource.data.rating >= 1 && resource.data.rating <= 5;
+      allow create: if isSignedIn()
+        && isValidMovieReview(incoming(), reviewId)
+        && isOwner(incoming().userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && (isOwner(existing().userId) || isAdmin())
+        && isValidMovieReview(incoming(), reviewId)
+        && incoming().reviewId == existing().reviewId
+        && incoming().userId == existing().userId
+        && incoming().movieId == existing().movieId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['authorName', 'rating', 'headline', 'body', 'containsSpoilers', 'updatedAt']));
       allow delete: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
     }
 

@@ -144,6 +144,146 @@
       },
       "required": ["ratingId", "movieId", "userId", "rating", "createdAt", "updatedAt"]
     },
+    "MovieReview": {
+      "title": "MovieReview",
+      "description": "A formal text-based movie review with a 1-to-5 star rating submitted by an authenticated user.",
+      "type": "object",
+      "properties": {
+        "reviewId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 256,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "movieId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "rating": {
+          "type": "number"
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "body": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 2000
+        },
+        "containsSpoilers": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "reviewId",
+        "movieId",
+        "userId",
+        "authorName",
+        "rating",
+        "headline",
+        "body",
+        "containsSpoilers",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WatchProgress": {
+      "title": "WatchProgress",
+      "description": "Saved playback timestamp so a member can resume a movie right where they stopped.",
+      "type": "object",
+      "properties": {
+        "movieId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "progressSeconds": {
+          "type": "number"
+        },
+        "durationSeconds": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["movieId", "userId", "progressSeconds", "durationSeconds", "updatedAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Persisted streaming, download, WiFi, notification, and language preferences for a member.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "videoQuality": {
+          "type": "string",
+          "enum": ["auto", "360p", "480p", "720p", "1080p"]
+        },
+        "downloadQuality": {
+          "type": "string",
+          "enum": ["360p", "480p", "720p", "1080p"]
+        },
+        "downloadWifiOnly": {
+          "type": "boolean"
+        },
+        "notificationsEnabled": {
+          "type": "boolean"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "es", "fr", "de", "pt"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "videoQuality",
+        "downloadQuality",
+        "downloadWifiOnly",
+        "notificationsEnabled",
+        "language",
+        "updatedAt"
+      ]
+    },
     "AdminRole": {
       "title": "AdminRole",
       "description": "Authorized administrator record granting movie upload and catalog management privileges.",
@@ -301,6 +441,14 @@
       "schema": { "$ref": "#/entities/SavedMovie" },
       "description": "Personalized saved watchlist entries belonging to the member."
     },
+    "/users/{userId}/watchProgress/{movieId}": {
+      "schema": { "$ref": "#/entities/WatchProgress" },
+      "description": "Per-movie playback progress timestamps for Continue Watching."
+    },
+    "/users/{userId}/settings/preferences": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "Member preferences for video quality, download quality, Wi-Fi-only downloads, notifications, and language."
+    },
     "/users/{userId}/releaseNotifications/{releaseId}": {
       "schema": { "$ref": "#/entities/ReleaseNotification" },
       "description": "Upcoming movie release notification subscriptions belonging to the member."
@@ -312,6 +460,10 @@
     "/movieRatings/{ratingId}": {
       "schema": { "$ref": "#/entities/MovieRating" },
       "description": "One 1-to-5 star rating per authenticated user per movie."
+    },
+    "/movieReviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/MovieReview" },
+      "description": "One formal text review with star rating per authenticated user per movie."
     },
     "/admins/{userId}": {
       "schema": { "$ref": "#/entities/AdminRole" },

@@ -6,9 +6,8 @@ import {
   onSnapshot,
   query,
   serverTimestamp,
-  setDoc,
-  updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 
@@ -19,10 +18,17 @@ export interface RatingRecord {
   rating: number;
 }
 
+export type StarDistribution = Record<1 | 2 | 3 | 4 | 5, number>;
+
 export interface MovieRatingSummary {
   average: number;
   count: number;
   userRating: number | null;
+  distribution: StarDistribution;
+}
+
+function emptyDistribution(): StarDistribution {
+  return { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
 }
 
 export function useMovieRatings(currentUserId?: string) {
@@ -59,14 +65,24 @@ export function useMovieRatings(currentUserId?: string) {
   }, []);
 
   const ratingsByMovie = useMemo(() => {
-    const map = new Map<string, { sum: number; count: number; userRating: number | null }>();
+    const map = new Map<
+      string,
+      { sum: number; count: number; userRating: number | null; distribution: StarDistribution }
+    >();
 
     for (const r of records) {
-      const entry = map.get(r.movieId) || { sum: 0, count: 0, userRating: null };
-      entry.sum += r.rating;
+      const entry = map.get(r.movieId) || {
+        sum: 0,
+        count: 0,
+        userRating: null,
+        distribution: emptyDistribution(),
+      };
+      const starKey = Math.min(5, Math.max(1, Math.round(r.rating))) as 1 | 2 | 3 | 4 | 5;
+      entry.sum += starKey;
       entry.count += 1;
+      entry.distribution[starKey] += 1;
       if (currentUserId && r.userId === currentUserId) {
-        entry.userRating = r.rating;
+        entry.userRating = starKey;
       }
       map.set(r.movieId, entry);
     }
@@ -77,6 +93,7 @@ export function useMovieRatings(currentUserId?: string) {
         average: entry.count > 0 ? Math.round((entry.sum / entry.count) * 10) / 10 : 0,
         count: entry.count,
         userRating: entry.userRating,
+        distribution: entry.distribution,
       };
     }
     return result;
@@ -89,12 +106,18 @@ export function useMovieRatings(currentUserId?: string) {
       const cleanMovieId = movieId.slice(0, 128);
       const ratingId = `${cleanMovieId}__${currentUserId}`;
       const path = `movieRatings/${ratingId}`;
-      const ref = doc(db, 'movieRatings', ratingId);
+      const ratingRef = doc(db, 'movieRatings', ratingId);
+      const reviewRef = doc(db, 'movieReviews', ratingId);
 
       try {
-        const existing = await getDocFromServer(ref);
-        if (!existing.exists()) {
-          await setDoc(ref, {
+        const [existingRating, existingReview] = await Promise.all([
+          getDocFromServer(ratingRef),
+          getDocFromServer(reviewRef),
+        ]);
+
+        const batch = writeBatch(db);
+        if (!existingRating.exists()) {
+          batch.set(ratingRef, {
             ratingId,
             movieId: cleanMovieId,
             userId: currentUserId,
@@ -103,11 +126,21 @@ export function useMovieRatings(currentUserId?: string) {
             updatedAt: serverTimestamp(),
           });
         } else {
-          await updateDoc(ref, {
+          batch.update(ratingRef, {
             rating: clamped,
             updatedAt: serverTimestamp(),
           });
         }
+
+        // Keep user's formal review star rating synchronized when one exists
+        if (existingReview.exists()) {
+          batch.update(reviewRef, {
+            rating: clamped,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        await batch.commit();
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, path);
       }

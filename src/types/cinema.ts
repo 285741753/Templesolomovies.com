@@ -1,8 +1,12 @@
+export const WHATSAPP_CHANNEL_URL =
+  'https://whatsapp.com/channel/0029VbD1VkL9sBI2TwMNmg3I';
+
 export type MovieGenre =
-  | 'Thriller'
-  | 'Sci-Fi'
-  | 'Drama'
   | 'Action'
+  | 'Nollywood'
+  | 'Sci-Fi'
+  | 'Thriller'
+  | 'Drama'
   | 'Mystery'
   | 'Comedy'
   | 'Documentary'
@@ -21,6 +25,7 @@ export interface Movie {
   director: string;
   uploader: string;
   synopsis: string;
+  imdbRating?: number;
   posterUrl: string;
   backdropUrl?: string;
   videoUrl: string;
@@ -48,6 +53,37 @@ export interface UpcomingMovie {
   createdAt: string;
 }
 
+export interface MovieReview {
+  reviewId: string;
+  movieId: string;
+  userId: string;
+  authorName: string;
+  rating: number;
+  headline: string;
+  body: string;
+  containsSpoilers: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface WatchProgressEntry {
+  movieId: string;
+  userId: string;
+  progressSeconds: number;
+  durationSeconds: number;
+  updatedAtMs: number;
+}
+
+export type VideoQualitySetting = 'auto' | '360p' | '480p' | '720p' | '1080p';
+export type DownloadQualitySetting = '360p' | '480p' | '720p' | '1080p';
+
+export interface AppSettings {
+  videoQuality: VideoQualitySetting;
+  downloadQuality: DownloadQualitySetting;
+  downloadWifiOnly: boolean;
+  notificationsEnabled: boolean;
+}
+
 export type ChatRoomId = 'general' | 'requests' | 'drops';
 
 export interface MovieChatReference {
@@ -68,12 +104,29 @@ export interface ChatMessage {
   timestamp: string;
   isSystem?: boolean;
   movieRef?: MovieChatReference;
+  likedBy?: string[];
 }
 
 export interface OnlineUser {
   userId: string;
   username: string;
   room: ChatRoomId;
+}
+
+export interface WatchPartyParticipant {
+  userId: string;
+  username: string;
+}
+
+export interface WatchPartyState {
+  roomCode: string;
+  movieId: string;
+  isPlaying: boolean;
+  currentTime: number;
+  updatedAt: number;
+  hostUserId: string;
+  hostName: string;
+  participants: WatchPartyParticipant[];
 }
 
 export type ServerWsEvent =
@@ -114,8 +167,21 @@ export type ServerWsEvent =
       message: ChatMessage;
     }
   | {
+      type: 'chat:like_updated';
+      messageId: string;
+      likedBy: string[];
+    }
+  | {
       type: 'presence:update';
       onlineUsers: OnlineUser[];
+    }
+  | {
+      type: 'party:state';
+      party: WatchPartyState;
+    }
+  | {
+      type: 'party:error';
+      message: string;
     };
 
 export type ClientWsEvent =
@@ -141,4 +207,29 @@ export type ClientWsEvent =
       username: string;
       text: string;
       movieRef?: MovieChatReference;
+    }
+  | {
+      type: 'chat:like';
+      messageId: string;
+      userId: string;
+    }
+  | {
+      type: 'party:join';
+      roomCode: string;
+      movieId?: string;
+      userId: string;
+      username: string;
+    }
+  | {
+      type: 'party:leave';
+      roomCode: string;
+      userId: string;
+    }
+  | {
+      type: 'party:sync';
+      roomCode: string;
+      movieId: string;
+      isPlaying: boolean;
+      currentTime: number;
+      userId: string;
     };

@@ -13,9 +13,10 @@ interface UploadMovieModalProps {
 
 const GENRES: MovieGenre[] = [
   'Action',
+  'Nollywood',
+  'Sci-Fi',
   'Drama',
   'Thriller',
-  'Sci-Fi',
   'Comedy',
   'Mystery',
   'Documentary',
@@ -42,6 +43,7 @@ export function UploadMovieModal({
   const [duration, setDuration] = useState('');
   const [director, setDirector] = useState('');
   const [uploader, setUploader] = useState(defaultUploader || 'TempleSolo');
+  const [imdbRating, setImdbRating] = useState('7.8');
   const [synopsis, setSynopsis] = useState('');
 
   const [isDragging, setIsDragging] = useState(false);
@@ -150,6 +152,7 @@ export function UploadMovieModal({
     setQuality('1080p HD');
     setDuration('');
     setDirector('');
+    setImdbRating('7.8');
     setSynopsis('');
     setUploadProgress(0);
     setError('');
@@ -184,6 +187,7 @@ export function UploadMovieModal({
     formData.append('duration', duration.trim() || '1h 45m');
     formData.append('director', director.trim() || 'Independent');
     formData.append('uploader', uploader.trim() || defaultUploader || 'Community');
+    formData.append('imdbRating', imdbRating.trim() || '7.8');
     formData.append('synopsis', synopsis.trim());
 
     const xhr = new XMLHttpRequest();
@@ -441,8 +445,8 @@ export function UploadMovieModal({
             </div>
           </div>
 
-          {/* Year, Duration, Director, Uploader */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Year, Runtime, Director, IMDb, Uploader */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <div>
               <label
                 htmlFor="movie-year"
@@ -496,6 +500,25 @@ export function UploadMovieModal({
             </div>
 
             <div>
+              <label
+                htmlFor="movie-imdb"
+                className="block text-xs font-medium text-[#D4D4D8] mb-1.5"
+              >
+                IMDb Rating
+              </label>
+              <input
+                id="movie-imdb"
+                type="number"
+                min={1.0}
+                max={10.0}
+                step={0.1}
+                value={imdbRating}
+                onChange={(e) => setImdbRating(e.target.value)}
+                className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm font-mono tabular-nums text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none"
+              />
+            </div>
+
+            <div className="col-span-2 sm:col-span-1">
               <label
                 htmlFor="movie-uploader"
                 className="block text-xs font-medium text-[#D4D4D8] mb-1.5"

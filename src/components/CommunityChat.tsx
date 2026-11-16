@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { Send, Users, Edit2, Check, Film, Download, X } from 'lucide-react';
+import {
+  Send,
+  Users,
+  Edit2,
+  Check,
+  Film,
+  Download,
+  X,
+  Heart,
+  MessageCircle,
+  ExternalLink,
+} from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import type {
-  ChatMessage,
-  ChatRoomId,
-  Movie,
-  MovieChatReference,
-  OnlineUser,
+import {
+  WHATSAPP_CHANNEL_URL,
+  type ChatMessage,
+  type ChatRoomId,
+  type Movie,
+  type MovieChatReference,
+  type OnlineUser,
 } from '../types/cinema';
 import { formatTime } from '../utils/format';
 
@@ -22,6 +34,7 @@ interface CommunityChatProps {
   onSwitchRoom: (room: ChatRoomId) => void;
   onRenameUser: (nextName: string) => void;
   onSendMessage: (text: string, movieRef?: MovieChatReference) => void;
+  onToggleLikeMessage: (messageId: string) => void;
   onClearPendingMovie: () => void;
   onOpenMovieById: (movieId: string) => void;
   onDownloadMovieById: (movieId: string) => void;
@@ -39,6 +52,7 @@ export function CommunityChat({
   onSwitchRoom,
   onRenameUser,
   onSendMessage,
+  onToggleLikeMessage,
   onClearPendingMovie,
   onOpenMovieById,
   onDownloadMovieById,
@@ -203,6 +217,25 @@ export function CommunityChat({
           )}
         </div>
 
+        {/* Official WhatsApp Channel Link */}
+        <a
+          href={WHATSAPP_CHANNEL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-2.5 flex items-center justify-between gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/25 px-3 py-2 text-xs transition-colors hover:border-emerald-400/50 hover:bg-emerald-950/40"
+        >
+          <span className="flex items-center gap-2 min-w-0">
+            <MessageCircle className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
+            <span className="truncate font-medium text-emerald-200">
+              {t('joinWhatsappChannel')}
+            </span>
+          </span>
+          <span className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-400 shrink-0">
+            <span>{t('whatsappChannel')}</span>
+            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+          </span>
+        </a>
+
         {/* Expandable Online Users Drawer */}
         {showUsers && (
           <div className="mt-2.5 rounded-lg border border-[#27272A] bg-[#09090B] p-2.5 max-h-28 overflow-y-auto">
@@ -250,6 +283,9 @@ export function CommunityChat({
             const movieExists = msg.movieRef
               ? movies.some((m) => m.id === msg.movieRef?.id)
               : false;
+            const likedBy = Array.isArray(msg.likedBy) ? msg.likedBy : [];
+            const likeCount = likedBy.length;
+            const hasLiked = likedBy.includes(userId);
 
             return (
               <div key={msg.id} className="space-y-1">
@@ -322,6 +358,42 @@ export function CommunityChat({
                       )}
                     </div>
                   )}
+
+                {(!isOwn || likeCount > 0) && (
+                  <div className="pt-0.5 flex items-center gap-2">
+                    {!isOwn ? (
+                      <button
+                        type="button"
+                        onClick={() => onToggleLikeMessage(msg.id)}
+                        aria-pressed={hasLiked}
+                        aria-label={`${hasLiked ? t('likedMessage') : t('likeMessage')} — ${msg.username}${likeCount > 0 ? ` (${likeCount})` : ''}`}
+                        className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                          hasLiked
+                            ? 'border-[#E5A93B]/50 bg-[#E5A93B]/10 text-[#E5A93B]'
+                            : 'border-[#27272A] bg-[#09090B]/60 text-[#71717A] hover:border-[#3F3F46] hover:text-[#D4D4D8]'
+                        }`}
+                      >
+                        <Heart
+                          className={`h-3 w-3 ${hasLiked ? 'fill-[#E5A93B] text-[#E5A93B]' : ''}`}
+                          aria-hidden="true"
+                        />
+                        {likeCount > 0 ? (
+                          <span className="font-mono tabular-nums">{likeCount}</span>
+                        ) : (
+                          <span>{t('likeMessage')}</span>
+                        )}
+                      </button>
+                    ) : (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-md border border-[#27272A]/80 bg-[#09090B]/60 px-2 py-0.5 text-[11px] font-mono tabular-nums text-[#A1A1AA]"
+                        aria-label={`${likeCount} likes`}
+                      >
+                        <Heart className="h-3 w-3 fill-[#E5A93B]/70 text-[#E5A93B]" aria-hidden="true" />
+                        <span>{likeCount}</span>
+                      </span>
+                    )}
+                  </div>
+                )}
                 </div>
               );
             })

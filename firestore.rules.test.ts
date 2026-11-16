@@ -17,5 +17,12 @@ export const DIRTY_DOZEN_CASES = [
   { name: 'Ordinary user listing /admins registry', path: '/admins', actor: 'u1', expected: 'PERMISSION_DENIED' },
   { name: 'Cross-user releaseNotification read', path: '/users/u2/releaseNotifications/upcoming-1', actor: 'u1', expected: 'PERMISSION_DENIED' },
   { name: 'Ordinary user creating /upcomingMovies entry', path: '/upcomingMovies/upcoming-new', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Cross-user movie review spoofing', path: '/movieReviews/m1__u2', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Oversized movie review body poisoning', path: '/movieReviews/m1__u1', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Ordinary user deleting another member movie review', path: '/movieReviews/m1__u2', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Cross-user watchProgress read/write', path: '/users/u2/watchProgress/m1', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Negative or oversized progressSeconds poisoning', path: '/users/u1/watchProgress/m1', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Cross-user settings preferences read/write', path: '/users/u2/settings/preferences', actor: 'u1', expected: 'PERMISSION_DENIED' },
+  { name: 'Invalid videoQuality enum poisoning on settings', path: '/users/u1/settings/preferences', actor: 'u1', expected: 'PERMISSION_DENIED' },
 ] as const;
 

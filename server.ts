@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -5,8 +6,10 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
+import zlib from 'zlib';
 import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
+import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
 import type {
   ChatMessage,
   ChatRoomId,
@@ -17,6 +20,7 @@ import type {
   OnlineUser,
   ServerWsEvent,
   UpcomingMovie,
+  WatchPartyState,
 } from './src/types/cinema.ts';
 
 const execFileAsync = promisify(execFile);
@@ -154,7 +158,12 @@ function loadDatabase(): DatabaseState {
       const parsed = JSON.parse(raw) as Partial<DatabaseState>;
       return {
         movies: Array.isArray(parsed.movies) ? parsed.movies : [],
-        messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+        messages: Array.isArray(parsed.messages)
+          ? parsed.messages.map((m) => ({
+              ...m,
+              likedBy: Array.isArray(m.likedBy) ? m.likedBy : [],
+            }))
+          : [],
         upcomingMovies: Array.isArray(parsed.upcomingMovies) ? parsed.upcomingMovies : [],
         releaseSubscriptions: Array.isArray(parsed.releaseSubscriptions)
           ? parsed.releaseSubscriptions
@@ -183,6 +192,7 @@ interface SeedMovieSpec {
   director: string;
   uploader: string;
   synopsis: string;
+  imdbRating: number;
   sourcePosterFile: string;
   sourceBackdropFile?: string;
   posterTargetName: string;
@@ -195,6 +205,255 @@ interface SeedMovieSpec {
 
 const SEED_SPECS: SeedMovieSpec[] = [
   {
+    id: 'movie-obsidian-dawn',
+    title: 'Obsidian Dawn',
+    genre: 'Sci-Fi',
+    year: 2024,
+    duration: '2h 14m',
+    quality: '4K UHD',
+    director: 'Kofi Mensah',
+    uploader: 'TempleSolo',
+    synopsis:
+      'In a fortified orbital metropolis under solar siege, an elite tactical vanguard descends to reclaim the last obsidian power spire before dawn.',
+    imdbRating: 8.8,
+    sourcePosterFile: 'poster_iron_horizon_1794734030987.jpg',
+    sourceBackdropFile: 'hero_midnight_meridian_1794734028437.jpg',
+    posterTargetName: 'obsidian_dawn_poster.jpg',
+    backdropTargetName: 'obsidian_dawn_backdrop.jpg',
+    videoFileName: 'obsidian-dawn-4k.mp4',
+    downloads: 1842,
+    featured: true,
+    createdAt: '2026-11-16T02:00:00.000Z',
+  },
+  {
+    id: 'movie-vengeance-protocol',
+    title: 'Vengeance Protocol',
+    genre: 'Action',
+    year: 2025,
+    duration: '2h 04m',
+    quality: '4K UHD',
+    director: 'Devon Kade',
+    uploader: 'TempleSolo',
+    synopsis:
+      'After a black-ops extraction team is burned mid-mission, a lone operative activates a forgotten counter-strike dossier across three borders.',
+    imdbRating: 8.1,
+    sourcePosterFile: 'poster_iron_horizon_1794734030987.jpg',
+    posterTargetName: 'iron_horizon_poster.jpg',
+    videoFileName: 'vengeance-protocol-4k.mp4',
+    downloads: 1320,
+    featured: false,
+    createdAt: '2026-11-15T19:00:00.000Z',
+  },
+  {
+    id: 'movie-black-ops-iii',
+    title: 'Black Ops III',
+    genre: 'Action',
+    year: 2025,
+    duration: '2h 14m',
+    quality: '4K UHD',
+    director: 'Marcus Cole',
+    uploader: 'TempleSolo',
+    synopsis:
+      'An armored strike squad infiltrates a subterranean rail fortress to disarm an autonomous satellite uplink before countdown zero.',
+    imdbRating: 7.9,
+    sourcePosterFile: 'upcoming_cinder_pass_1794747753251.jpg',
+    posterTargetName: 'upcoming_cinder_pass.jpg',
+    videoFileName: 'black-ops-iii-4k.mp4',
+    downloads: 1185,
+    featured: false,
+    createdAt: '2026-11-15T18:00:00.000Z',
+  },
+  {
+    id: 'movie-redemption-strike',
+    title: 'Redemption Strike',
+    genre: 'Action',
+    year: 2025,
+    duration: '1h 56m',
+    quality: '1080p HD',
+    director: 'Mateo Silva',
+    uploader: 'TempleSolo',
+    synopsis:
+      'With sixty minutes before an offshore rig detonates, a disgraced tactician teams up with coastal defenders for one final assault.',
+    imdbRating: 7.4,
+    sourcePosterFile: 'upcoming_glass_monsoon_1794747751625.jpg',
+    posterTargetName: 'upcoming_glass_monsoon.jpg',
+    videoFileName: 'redemption-strike-1080p.mp4',
+    downloads: 1044,
+    featured: false,
+    createdAt: '2026-11-15T17:00:00.000Z',
+  },
+  {
+    id: 'movie-shadow-hunt',
+    title: 'Shadow Hunt',
+    genre: 'Action',
+    year: 2025,
+    duration: '2h 02m',
+    quality: '4K UHD',
+    director: 'Julian Vance',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Through rain-slicked harbor alleys, a relentless tracker hunts the phantom courier carrying encrypted syndicate keys.',
+    imdbRating: 8.3,
+    sourcePosterFile: 'hero_midnight_meridian_1794734028437.jpg',
+    posterTargetName: 'midnight_meridian_poster.jpg',
+    videoFileName: 'shadow-hunt-4k.mp4',
+    downloads: 992,
+    featured: false,
+    createdAt: '2026-11-15T16:00:00.000Z',
+  },
+  {
+    id: 'movie-lagos-bloodline',
+    title: 'Lagos Bloodline',
+    genre: 'Nollywood',
+    year: 2026,
+    duration: '2h 18m',
+    quality: '4K UHD',
+    director: 'Tunde Adeyemi',
+    uploader: 'TempleSolo',
+    synopsis:
+      'When a coastal shipping empire faces a hostile takeover on Victoria Island, a fearless matriarch fights to safeguard her family legacy.',
+    imdbRating: 8.6,
+    sourcePosterFile: 'poster_velvet_echo_1794734030259.jpg',
+    posterTargetName: 'velvet_echo_poster.jpg',
+    videoFileName: 'lagos-bloodline-4k.mp4',
+    downloads: 1480,
+    featured: false,
+    createdAt: '2026-11-15T15:00:00.000Z',
+  },
+  {
+    id: 'movie-chiefs-oath',
+    title: "The Chief's Oath",
+    genre: 'Nollywood',
+    year: 2026,
+    duration: '2h 08m',
+    quality: '4K UHD',
+    director: 'Amara Okafor',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Bound by an ancient royal vow, a young heir returns from abroad to confront palace intrigue and unite two rival provinces.',
+    imdbRating: 8.4,
+    sourcePosterFile: 'poster_golden_harbor_1794734029335.jpg',
+    posterTargetName: 'golden_harbor_poster.jpg',
+    videoFileName: 'the-chiefs-oath-4k.mp4',
+    downloads: 1295,
+    featured: false,
+    createdAt: '2026-11-15T14:00:00.000Z',
+  },
+  {
+    id: 'movie-money-and-blood',
+    title: 'Money & Blood',
+    genre: 'Nollywood',
+    year: 2025,
+    duration: '1h 59m',
+    quality: '1080p HD',
+    director: 'Chidi Nwosu',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Two childhood friends turned high-stakes Lagos financiers find their brotherhood tested when a billion-naira ledger vanishes overnight.',
+    imdbRating: 7.7,
+    sourcePosterFile: 'upcoming_copper_symphony_1794747752684.jpg',
+    posterTargetName: 'upcoming_copper_symphony.jpg',
+    videoFileName: 'money-and-blood-1080p.mp4',
+    downloads: 1170,
+    featured: false,
+    createdAt: '2026-11-15T13:00:00.000Z',
+  },
+  {
+    id: 'movie-asahi-the-heir',
+    title: 'Asahi: The Heir',
+    genre: 'Nollywood',
+    year: 2026,
+    duration: '2h 11m',
+    quality: '4K UHD',
+    director: 'Ngozi Eze',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Returning home after years in exile, Asahi must outmaneuver treacherous councilmen to claim his rightful throne.',
+    imdbRating: 8.2,
+    sourcePosterFile: 'poster_golden_harbor_1794734029335.jpg',
+    posterTargetName: 'golden_harbor_poster.jpg',
+    videoFileName: 'asahi-the-heir-4k.mp4',
+    downloads: 1085,
+    featured: false,
+    createdAt: '2026-11-15T12:00:00.000Z',
+  },
+  {
+    id: 'movie-neon-voyager',
+    title: 'Neon Voyager',
+    genre: 'Sci-Fi',
+    year: 2026,
+    duration: '2h 20m',
+    quality: '4K UHD',
+    director: 'Elena Rostova',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Piloting an experimental light-sail cruiser past Jupiter, a navigator decodes an interstellar beacon pulsing inside a cosmic dust storm.',
+    imdbRating: 8.9,
+    sourcePosterFile: 'poster_orbital_drift_1794734028947.jpg',
+    posterTargetName: 'orbital_drift_poster.jpg',
+    videoFileName: 'neon-voyager-4k.mp4',
+    downloads: 1365,
+    featured: false,
+    createdAt: '2026-11-15T11:00:00.000Z',
+  },
+  {
+    id: 'movie-project-nebula',
+    title: 'Project Nebula',
+    genre: 'Sci-Fi',
+    year: 2025,
+    duration: '2h 15m',
+    quality: '4K UHD',
+    director: 'Henrik Lindqvist',
+    uploader: 'TempleSolo',
+    synopsis:
+      'When deep-space observatory sensors capture an artificial horizon anomaly, two astrophysicists launch a daring rescue flight.',
+    imdbRating: 8.0,
+    sourcePosterFile: 'upcoming_solstice_station_1794747751566.jpg',
+    posterTargetName: 'upcoming_solstice_station.jpg',
+    videoFileName: 'project-nebula-4k.mp4',
+    downloads: 1210,
+    featured: false,
+    createdAt: '2026-11-15T10:00:00.000Z',
+  },
+  {
+    id: 'movie-stasis-loop',
+    title: 'Stasis Loop',
+    genre: 'Sci-Fi',
+    year: 2025,
+    duration: '1h 54m',
+    quality: '1080p HD',
+    director: 'Clara Moreau',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Trapped inside a recurring twelve-hour cryo-hibernation cycle, an engineer leaves tactical clues for her own future self.',
+    imdbRating: 7.3,
+    sourcePosterFile: 'poster_orbital_drift_1794734028947.jpg',
+    posterTargetName: 'orbital_drift_poster.jpg',
+    videoFileName: 'stasis-loop-1080p.mp4',
+    downloads: 940,
+    featured: false,
+    createdAt: '2026-11-15T09:00:00.000Z',
+  },
+  {
+    id: 'movie-void-protocol',
+    title: 'Void Protocol',
+    genre: 'Sci-Fi',
+    year: 2026,
+    duration: '2h 06m',
+    quality: '4K UHD',
+    director: 'Soren Patel',
+    uploader: 'TempleSolo',
+    synopsis:
+      'At the edge of an uncharted wormhole relay, a tactical commander enforces the final quarantine protocol.',
+    imdbRating: 7.6,
+    sourcePosterFile: 'upcoming_solstice_station_1794747751566.jpg',
+    posterTargetName: 'upcoming_solstice_station.jpg',
+    videoFileName: 'void-protocol-4k.mp4',
+    downloads: 880,
+    featured: false,
+    createdAt: '2026-11-15T08:00:00.000Z',
+  },
+  {
     id: 'movie-midnight-meridian',
     title: 'The Midnight Meridian',
     genre: 'Thriller',
@@ -205,32 +464,15 @@ const SEED_SPECS: SeedMovieSpec[] = [
     uploader: 'TempleSolo',
     synopsis:
       'A nocturnal transit investigator uncovers a city-wide ledger of erased departures along the harbor bridge, racing the dawn tide before the archive goes dark.',
+    imdbRating: 9.1,
     sourcePosterFile: 'hero_midnight_meridian_1794734028437.jpg',
     sourceBackdropFile: 'hero_midnight_meridian_1794734028437.jpg',
     posterTargetName: 'midnight_meridian_poster.jpg',
     backdropTargetName: 'midnight_meridian_backdrop.jpg',
     videoFileName: 'the-midnight-meridian-4k.mp4',
     downloads: 1428,
-    featured: true,
-    createdAt: '2026-11-10T18:00:00.000Z',
-  },
-  {
-    id: 'movie-orbital-drift',
-    title: 'Orbital Drift',
-    genre: 'Sci-Fi',
-    year: 2026,
-    duration: '2h 28m',
-    quality: '4K UHD',
-    director: 'Elena Rostova',
-    uploader: 'TempleSolo',
-    synopsis:
-      'Cut off from deep-space telemetry beyond Saturn’s outer ring, a lone salvage pilot must manually dock with a silent relay station before solar wind tears the orbit apart.',
-    sourcePosterFile: 'poster_orbital_drift_1794734028947.jpg',
-    posterTargetName: 'orbital_drift_poster.jpg',
-    videoFileName: 'orbital-drift-4k.mp4',
-    downloads: 1194,
     featured: false,
-    createdAt: '2026-11-11T14:30:00.000Z',
+    createdAt: '2026-11-10T18:00:00.000Z',
   },
   {
     id: 'movie-golden-harbor',
@@ -243,6 +485,7 @@ const SEED_SPECS: SeedMovieSpec[] = [
     uploader: 'TempleSolo',
     synopsis:
       'Over a single fog-bound weekend on Pier 19, a retired dockmaster confronts the shipping syndicate that built his town and nearly sank his family.',
+    imdbRating: 8.5,
     sourcePosterFile: 'poster_golden_harbor_1794734029335.jpg',
     posterTargetName: 'golden_harbor_poster.jpg',
     videoFileName: 'golden-harbor-1080p.mp4',
@@ -261,30 +504,13 @@ const SEED_SPECS: SeedMovieSpec[] = [
     uploader: 'TempleSolo',
     synopsis:
       'When an abandoned 1930s opera house opens for one unannounced rehearsal, a sound archivist discovers that the stage acoustics preserve conversations decades after they were spoken.',
+    imdbRating: 7.8,
     sourcePosterFile: 'poster_velvet_echo_1794734030259.jpg',
     posterTargetName: 'velvet_echo_poster.jpg',
     videoFileName: 'velvet-echo-1080p.mp4',
     downloads: 742,
     featured: false,
     createdAt: '2026-11-13T16:45:00.000Z',
-  },
-  {
-    id: 'movie-iron-horizon',
-    title: 'Iron Horizon',
-    genre: 'Action',
-    year: 2025,
-    duration: '2h 06m',
-    quality: '4K UHD',
-    director: 'Devon Kade',
-    uploader: 'TempleSolo',
-    synopsis:
-      'Tasked with escorting a geothermal core across four hundred miles of electrified salt flats, an armored convoy must outrun a supercell storm and rival scavengers.',
-    sourcePosterFile: 'poster_iron_horizon_1794734030987.jpg',
-    posterTargetName: 'iron_horizon_poster.jpg',
-    videoFileName: 'iron-horizon-4k.mp4',
-    downloads: 963,
-    featured: false,
-    createdAt: '2026-11-14T11:20:00.000Z',
   },
 ];
 
@@ -411,7 +637,19 @@ async function generateMp4FromPoster(posterPath: string, outputVideoPath: string
 function seedMetadataFast(db: DatabaseState): DatabaseState {
   const generatedImagesDir = path.join(ROOT_DIR, 'src', 'assets', 'images');
 
-  if (db.movies.length === 0) {
+  const shouldBackfillShowcase =
+    db.movies.length === 0 ||
+    (!db.movies.some((m) => m.genre === 'Nollywood') &&
+      db.movies.every((m) => m.isSeeded));
+
+  if (shouldBackfillShowcase) {
+    if (db.movies.length > 0) {
+      for (const m of db.movies) {
+        if (m.id === 'movie-midnight-meridian') {
+          m.featured = false;
+        }
+      }
+    }
     for (const spec of SEED_SPECS) {
       const srcPoster = path.join(generatedImagesDir, spec.sourcePosterFile);
       const destPoster = path.join(POSTERS_DIR, spec.posterTargetName);
@@ -429,6 +667,8 @@ function seedMetadataFast(db: DatabaseState): DatabaseState {
         backdropUrl = `/storage/posters/${spec.backdropTargetName}`;
       }
 
+      if (db.movies.some((m) => m.id === spec.id)) continue;
+
       const videoPath = path.join(MOVIES_DIR, spec.videoFileName);
       const fileSizeBytes = fs.existsSync(videoPath) ? fs.statSync(videoPath).size : 524323;
 
@@ -442,6 +682,7 @@ function seedMetadataFast(db: DatabaseState): DatabaseState {
         director: spec.director,
         uploader: spec.uploader,
         synopsis: spec.synopsis,
+        imdbRating: spec.imdbRating,
         posterUrl: `/storage/posters/${spec.posterTargetName}`,
         backdropUrl,
         videoUrl: `/storage/movies/${spec.videoFileName}`,
@@ -453,6 +694,24 @@ function seedMetadataFast(db: DatabaseState): DatabaseState {
         isSeeded: true,
         createdAt: spec.createdAt,
       });
+    }
+  }
+
+  const LEGACY_IMDB_RATINGS: Record<string, number> = {
+    'movie-orbital-drift': 8.7,
+    'movie-iron-horizon': 8.4,
+  };
+
+  for (const spec of SEED_SPECS) {
+    const existing = db.movies.find((m) => m.id === spec.id);
+    if (existing && typeof existing.imdbRating !== 'number') {
+      existing.imdbRating = spec.imdbRating;
+    }
+  }
+
+  for (const movie of db.movies) {
+    if (typeof movie.imdbRating !== 'number') {
+      movie.imdbRating = LEGACY_IMDB_RATINGS[movie.id] ?? 7.8;
     }
   }
 
@@ -544,10 +803,11 @@ async function seedStarterVideosInBackground(db: DatabaseState) {
 }
 
 const VALID_GENRES: MovieGenre[] = [
-  'Thriller',
-  'Sci-Fi',
-  'Drama',
   'Action',
+  'Nollywood',
+  'Sci-Fi',
+  'Thriller',
+  'Drama',
   'Mystery',
   'Comedy',
   'Documentary',
@@ -561,6 +821,37 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
+async function compressPosterImage(inputPath: string, maxWidth = 540): Promise<string> {
+  const dir = path.dirname(inputPath);
+  const base = path.basename(inputPath, path.extname(inputPath));
+  const outPath = path.join(dir, `${base}-opt.jpg`);
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-loglevel',
+      'error',
+      '-i',
+      inputPath,
+      '-vf',
+      `scale='min(${maxWidth},iw)':-2`,
+      '-q:v',
+      '5',
+      outPath,
+    ]);
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
+      if (outPath !== inputPath && fs.existsSync(inputPath)) {
+        fs.unlinkSync(inputPath);
+      }
+      return outPath;
+    }
+  } catch {
+    if (fs.existsSync(outPath)) {
+      fs.unlinkSync(outPath);
+    }
+  }
+  return inputPath;
+}
+
 async function startServer() {
   ensureDirectories();
   const db = seedMetadataFast(loadDatabase());
@@ -568,15 +859,45 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
-  // Serve public assets (favicon / app icon) and uploaded/seeded media
+  // Compress JSON responses with Brotli or Gzip for fast loading on slow networks
+  app.use((req, res, next) => {
+    const origJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      const jsonStr = JSON.stringify(body);
+      const accept = String(req.headers['accept-encoding'] || '');
+      if (jsonStr.length > 1024 && !res.headersSent) {
+        if (accept.includes('br')) {
+          const compressed = zlib.brotliCompressSync(jsonStr);
+          res.setHeader('Content-Encoding', 'br');
+          res.setHeader('Vary', 'Accept-Encoding');
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Content-Length', String(compressed.length));
+          return res.send(compressed);
+        }
+        if (accept.includes('gzip')) {
+          const compressed = zlib.gzipSync(jsonStr);
+          res.setHeader('Content-Encoding', 'gzip');
+          res.setHeader('Vary', 'Accept-Encoding');
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Content-Length', String(compressed.length));
+          return res.send(compressed);
+        }
+      }
+      return origJson(body);
+    }) as typeof res.json;
+    next();
+  });
+
+  // Serve public assets (favicon / app icon) and uploaded/seeded media with browser caching
   if (fs.existsSync(PUBLIC_DIR)) {
-    app.use(express.static(PUBLIC_DIR));
+    app.use(express.static(PUBLIC_DIR, { maxAge: '1d', etag: true, lastModified: true }));
   }
-  app.use('/storage/posters', express.static(POSTERS_DIR));
-  app.use('/storage/movies', express.static(MOVIES_DIR));
+  app.use('/storage/posters', express.static(POSTERS_DIR, { maxAge: '7d', etag: true, lastModified: true }));
+  app.use('/storage/movies', express.static(MOVIES_DIR, { maxAge: '1d', etag: true, lastModified: true }));
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
+  const liveWss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
     try {
@@ -584,6 +905,10 @@ async function startServer() {
       if (pathname === '/ws') {
         wss.handleUpgrade(req, socket, head, (ws) => {
           wss.emit('connection', ws, req);
+        });
+      } else if (pathname === '/ws/live') {
+        liveWss.handleUpgrade(req, socket, head, (ws) => {
+          liveWss.emit('connection', ws, req);
         });
       }
     } catch {
@@ -596,9 +921,42 @@ async function startServer() {
     userId: string;
     username: string;
     room: ChatRoomId;
+    partyCode?: string;
   }
 
   const clients = new Map<WebSocket, ConnectedClient>();
+  const watchParties = new Map<string, WatchPartyState>();
+
+  function sendToParty(roomCode: string, event: ServerWsEvent) {
+    const payload = JSON.stringify(event);
+    for (const [socket, client] of clients.entries()) {
+      if (client.partyCode === roomCode && socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      }
+    }
+  }
+
+  function removeClientFromParty(client: ConnectedClient, targetCode?: string) {
+    const code = targetCode || client.partyCode;
+    if (!code) return;
+    const party = watchParties.get(code);
+    if (client.partyCode === code) {
+      client.partyCode = undefined;
+    }
+    if (!party) return;
+
+    party.participants = party.participants.filter((p) => p.userId !== client.userId);
+    if (party.participants.length === 0) {
+      watchParties.delete(code);
+      return;
+    }
+
+    if (party.hostUserId === client.userId) {
+      party.hostUserId = party.participants[0].userId;
+      party.hostName = party.participants[0].username;
+    }
+    sendToParty(code, { type: 'party:state', party });
+  }
 
   function getOnlineUsers(): OnlineUser[] {
     const dedup = new Map<string, OnlineUser>();
@@ -655,6 +1013,18 @@ async function startServer() {
           if (nextName) {
             client.username = nextName;
             broadcast({ type: 'presence:update', onlineUsers: getOnlineUsers() });
+            if (client.partyCode) {
+              const party = watchParties.get(client.partyCode);
+              if (party) {
+                party.participants = party.participants.map((p) =>
+                  p.userId === client.userId ? { ...p, username: nextName } : p
+                );
+                if (party.hostUserId === client.userId) {
+                  party.hostName = nextName;
+                }
+                sendToParty(client.partyCode, { type: 'party:state', party });
+              }
+            }
           }
         } else if (data.type === 'room:switch') {
           client.room = data.room;
@@ -676,6 +1046,7 @@ async function startServer() {
             text: text || `Shared ${data.movieRef?.title ?? 'a movie'}`,
             timestamp: new Date().toISOString(),
             movieRef: data.movieRef,
+            likedBy: [],
           };
 
           db.messages.push(message);
@@ -684,6 +1055,99 @@ async function startServer() {
           }
           saveDatabase(db);
           broadcast({ type: 'chat:message', message });
+        } else if (data.type === 'chat:like') {
+          const messageId = String(data.messageId || '').trim();
+          const actorId = (client.userId || String(data.userId || '')).trim().slice(0, 64);
+          if (!messageId || !actorId) return;
+
+          const target = db.messages.find((m) => m.id === messageId);
+          if (!target || target.userId === actorId) return;
+
+          const existingLikes = Array.isArray(target.likedBy) ? target.likedBy : [];
+          const hasLiked = existingLikes.includes(actorId);
+          target.likedBy = hasLiked
+            ? existingLikes.filter((id) => id !== actorId)
+            : [...existingLikes, actorId];
+
+          saveDatabase(db);
+          broadcast({
+            type: 'chat:like_updated',
+            messageId: target.id,
+            likedBy: target.likedBy,
+          });
+        } else if (data.type === 'party:join') {
+          const roomCode = String(data.roomCode || '')
+            .trim()
+            .toUpperCase()
+            .replace(/[^A-Z0-9_-]/g, '')
+            .slice(0, 12);
+          if (!roomCode) {
+            ws.send(JSON.stringify({ type: 'party:error', message: 'Invalid Watch Party room code.' }));
+            return;
+          }
+
+          const actorId = (client.userId || String(data.userId || randomUUID())).slice(0, 64);
+          const actorName = (String(data.username || client.username || 'MovieFan').trim().slice(0, 32)) || 'MovieFan';
+          client.userId = actorId;
+          client.username = actorName;
+
+          if (client.partyCode && client.partyCode !== roomCode) {
+            removeClientFromParty(client, client.partyCode);
+          }
+          client.partyCode = roomCode;
+
+          let party = watchParties.get(roomCode);
+          if (!party) {
+            const initialMovieId =
+              (data.movieId && db.movies.some((m) => m.id === data.movieId) ? data.movieId : '') ||
+              db.movies[0]?.id ||
+              '';
+            party = {
+              roomCode,
+              movieId: initialMovieId,
+              isPlaying: false,
+              currentTime: 0,
+              updatedAt: Date.now(),
+              hostUserId: actorId,
+              hostName: actorName,
+              participants: [{ userId: actorId, username: actorName }],
+            };
+            watchParties.set(roomCode, party);
+          } else {
+            if (data.movieId && db.movies.some((m) => m.id === data.movieId) && actorId === party.hostUserId) {
+              party.movieId = data.movieId;
+              party.currentTime = 0;
+              party.isPlaying = false;
+              party.updatedAt = Date.now();
+            }
+            if (!party.participants.some((p) => p.userId === actorId)) {
+              party.participants.push({ userId: actorId, username: actorName });
+            }
+          }
+
+          sendToParty(roomCode, { type: 'party:state', party });
+        } else if (data.type === 'party:leave') {
+          const roomCode = String(data.roomCode || client.partyCode || '')
+            .trim()
+            .toUpperCase()
+            .slice(0, 12);
+          removeClientFromParty(client, roomCode);
+        } else if (data.type === 'party:sync') {
+          const roomCode = String(data.roomCode || client.partyCode || '')
+            .trim()
+            .toUpperCase()
+            .slice(0, 12);
+          const party = watchParties.get(roomCode);
+          if (!party) return;
+
+          if (data.movieId && db.movies.some((m) => m.id === data.movieId)) {
+            party.movieId = data.movieId;
+          }
+          party.isPlaying = Boolean(data.isPlaying);
+          party.currentTime = Math.max(0, Number(data.currentTime) || 0);
+          party.updatedAt = Date.now();
+
+          sendToParty(roomCode, { type: 'party:state', party });
         }
       } catch (err) {
         console.error('WebSocket message error:', err);
@@ -691,6 +1155,10 @@ async function startServer() {
     });
 
     ws.on('close', () => {
+      const client = clients.get(ws);
+      if (client) {
+        removeClientFromParty(client);
+      }
       clients.delete(ws);
       broadcast({ type: 'presence:update', onlineUsers: getOnlineUsers() });
     });
@@ -783,7 +1251,8 @@ async function startServer() {
 
         let posterUrl = '/storage/posters/midnight_meridian_poster.jpg';
         if (posterFile) {
-          posterUrl = `/storage/posters/${posterFile.filename}`;
+          const optimizedPath = await compressPosterImage(posterFile.path, 540);
+          posterUrl = `/storage/posters/${path.basename(optimizedPath)}`;
         } else {
           const extractedPosterName = `poster-${Date.now()}.jpg`;
           const extractedPosterPath = path.join(POSTERS_DIR, extractedPosterName);
@@ -796,8 +1265,10 @@ async function startServer() {
               videoFile.path,
               '-vframes',
               '1',
+              '-vf',
+              "scale='min(540,iw)':-2",
               '-q:v',
-              '2',
+              '5',
               extractedPosterPath,
             ]);
             if (fs.existsSync(extractedPosterPath) && fs.statSync(extractedPosterPath).size > 0) {
@@ -807,6 +1278,12 @@ async function startServer() {
             // Fallback silently
           }
         }
+
+        const rawImdb = Number(req.body.imdbRating);
+        const imdbRating =
+          Number.isFinite(rawImdb) && rawImdb >= 1 && rawImdb <= 10
+            ? Math.round(rawImdb * 10) / 10
+            : 7.8;
 
         const movie: Movie = {
           id: `movie-${randomUUID().slice(0, 8)}`,
@@ -818,6 +1295,7 @@ async function startServer() {
           director,
           uploader,
           synopsis,
+          imdbRating,
           posterUrl,
           videoUrl: `/storage/movies/${videoFile.filename}`,
           fileName: videoFile.originalname || videoFile.filename,
@@ -885,6 +1363,12 @@ async function startServer() {
     if (typeof req.body.director === 'string' && req.body.director.trim()) {
       movie.director = req.body.director.trim().slice(0, 80);
     }
+    if (req.body.imdbRating !== undefined) {
+      const parsedImdb = Number(req.body.imdbRating);
+      if (Number.isFinite(parsedImdb)) {
+        movie.imdbRating = Math.round(Math.min(10, Math.max(1, parsedImdb)) * 10) / 10;
+      }
+    }
 
     saveDatabase(db);
     res.json({ movie });
@@ -920,6 +1404,13 @@ async function startServer() {
       downloads: movie.downloads,
     });
 
+    const requestedQuality =
+      typeof req.query.quality === 'string' &&
+      ['360p', '480p', '720p', '1080p'].includes(req.query.quality)
+        ? req.query.quality
+        : '480p';
+    res.setHeader('X-Download-Quality', requestedQuality);
+
     const downloadName = sanitizeFilename(movie.fileName || `${movie.title}.mp4`);
     res.download(fullPath, downloadName);
   });
@@ -954,6 +1445,39 @@ async function startServer() {
     const room = req.query.room as ChatRoomId | undefined;
     const messages = room ? db.messages.filter((m) => m.room === room) : db.messages;
     res.json({ messages: messages.slice(-200) });
+  });
+
+  app.post('/api/chat/messages/:id/like', (req, res) => {
+    const messageId = String(req.params.id || '').trim();
+    const actorId = String(req.body?.userId || '').trim().slice(0, 64);
+    if (!actorId) {
+      res.status(400).json({ error: 'User ID is required to react to a message.' });
+      return;
+    }
+
+    const target = db.messages.find((m) => m.id === messageId);
+    if (!target) {
+      res.status(404).json({ error: 'Message not found.' });
+      return;
+    }
+    if (target.userId === actorId) {
+      res.status(400).json({ error: 'Cannot like your own message.' });
+      return;
+    }
+
+    const existingLikes = Array.isArray(target.likedBy) ? target.likedBy : [];
+    const hasLiked = existingLikes.includes(actorId);
+    target.likedBy = hasLiked
+      ? existingLikes.filter((id) => id !== actorId)
+      : [...existingLikes, actorId];
+
+    saveDatabase(db);
+    broadcast({
+      type: 'chat:like_updated',
+      messageId: target.id,
+      likedBy: target.likedBy,
+    });
+    res.json({ ok: true, messageId: target.id, likedBy: target.likedBy });
   });
 
   function computeSubscriberCount(upcoming: StoredUpcomingMovie): number {
@@ -1078,7 +1602,7 @@ async function startServer() {
     '/api/upcoming',
     requireAdmin,
     upload.single('poster'),
-    (req, res) => {
+    async (req, res) => {
       const title = String(req.body?.title || '').trim().slice(0, 140);
       if (!title) {
         if (req.file) fs.unlinkSync(req.file.path);
@@ -1100,9 +1624,11 @@ async function startServer() {
         String(req.body?.synopsis || '').trim().slice(0, 1000) ||
         `${title} is scheduled to arrive in the templesolosmovies.com vault on ${releaseDate}.`;
 
-      const posterUrl = req.file
-        ? `/storage/posters/${req.file.filename}`
-        : '/storage/posters/upcoming_glass_monsoon.jpg';
+      let posterUrl = '/storage/posters/upcoming_glass_monsoon.jpg';
+      if (req.file) {
+        const optimizedPath = await compressPosterImage(req.file.path, 540);
+        posterUrl = `/storage/posters/${path.basename(optimizedPath)}`;
+      }
 
       const created: StoredUpcomingMovie = {
         id: `upcoming-${randomUUID().slice(0, 8)}`,
@@ -1140,6 +1666,303 @@ async function startServer() {
     saveDatabase(db);
     broadcast({ type: 'upcoming:deleted', releaseId: removed.id });
     res.json({ ok: true });
+  });
+
+  function getGeminiClient(): GoogleGenAI | null {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    return new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+
+  const audioUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 25 * 1024 * 1024 },
+  });
+
+  app.get('/api/maps-config', (_req, res) => {
+    res.json({
+      apiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
+    });
+  });
+
+  app.post('/api/ai/chat', async (req, res) => {
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'Gemini API key is not configured on the server yet. Please check Settings > Secrets.',
+      });
+      return;
+    }
+
+    const message = String(req.body?.message || '').trim().slice(0, 4000);
+    if (!message) {
+      res.status(400).json({ error: 'Please enter a message.' });
+      return;
+    }
+
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+    for (const item of rawHistory.slice(-12)) {
+      if (
+        item &&
+        (item.role === 'user' || item.role === 'model') &&
+        typeof item.text === 'string' &&
+        item.text.trim()
+      ) {
+        contents.push({
+          role: item.role,
+          parts: [{ text: item.text.trim().slice(0, 4000) }],
+        });
+      }
+    }
+    contents.push({ role: 'user', parts: [{ text: message }] });
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents,
+        config: {
+          systemInstruction:
+            'You are the Temple Cinema Concierge on templesolosmovies.com. Answer film, box-office, cast, cinema history, chess strategy, and movie-vault questions concisely and accurately, citing live web facts from Google Search when relevant.',
+          tools: [{ googleSearch: {} }],
+        },
+      });
+
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+      const seenUris = new Set<string>();
+      const sources: Array<{ title: string; uri: string }> = [];
+      for (const chunk of chunks) {
+        const uri = chunk?.web?.uri;
+        const title = chunk?.web?.title;
+        if (uri && !seenUris.has(uri)) {
+          seenUris.add(uri);
+          sources.push({
+            title: title || uri,
+            uri,
+          });
+        }
+      }
+
+      res.json({
+        reply: response.text || 'I could not generate a response for that query.',
+        sources,
+      });
+    } catch (err) {
+      console.error('Gemini Search Chat error:', err);
+      const errMessage = err instanceof Error ? err.message : 'Failed to generate chat response.';
+      res.status(502).json({ error: errMessage });
+    }
+  });
+
+  app.post('/api/ai/transcribe', audioUpload.single('audio'), async (req, res) => {
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'Gemini API key is not configured on the server yet. Please check Settings > Secrets.',
+      });
+      return;
+    }
+
+    let base64Audio = '';
+    let mimeType = 'audio/webm';
+
+    if (req.file) {
+      base64Audio = req.file.buffer.toString('base64');
+      mimeType = req.file.mimetype || 'audio/webm';
+    } else if (typeof req.body?.audioBase64 === 'string' && req.body.audioBase64.trim()) {
+      base64Audio = req.body.audioBase64.trim();
+      mimeType = typeof req.body.mimeType === 'string' ? req.body.mimeType : 'audio/webm';
+    }
+
+    if (!base64Audio) {
+      res.status(400).json({ error: 'Please upload or record an audio clip to transcribe.' });
+      return;
+    }
+
+    const promptText =
+      typeof req.body?.prompt === 'string' && req.body.prompt.trim()
+        ? req.body.prompt.trim().slice(0, 500)
+        : 'Transcribe this audio accurately, preserving punctuation and speaker turns if discernible.';
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.5-transcribe',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: base64Audio,
+              },
+            },
+            { text: promptText },
+          ],
+        },
+      });
+
+      res.json({
+        transcript: response.text || '',
+      });
+    } catch (err) {
+      console.error('Gemini Audio Transcription error:', err);
+      const errMessage = err instanceof Error ? err.message : 'Failed to transcribe audio.';
+      res.status(502).json({ error: errMessage });
+    }
+  });
+
+  const ALLOWED_LIVE_VOICES = new Set(['Zephyr', 'Kore', 'Puck', 'Charon', 'Fenrir']);
+
+  liveWss.on('connection', async (clientWs, req) => {
+    const ai = getGeminiClient();
+    if (!ai) {
+      clientWs.send(
+        JSON.stringify({
+          type: 'error',
+          message: 'Gemini API key is not configured on the server yet.',
+        })
+      );
+      clientWs.close();
+      return;
+    }
+
+    let requestedVoice = 'Zephyr';
+    try {
+      const url = new URL(req.url || '/ws/live', 'http://localhost');
+      const v = url.searchParams.get('voice');
+      if (v && ALLOWED_LIVE_VOICES.has(v)) {
+        requestedVoice = v;
+      }
+    } catch {
+      // keep default
+    }
+
+    let closed = false;
+    let liveSession: Awaited<ReturnType<typeof ai.live.connect>> | null = null;
+
+    try {
+      liveSession = await ai.live.connect({
+        model: 'gemini-3.8-live',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: requestedVoice },
+            },
+          },
+          systemInstruction:
+            'You are a friendly, expressive cinema host and trivia companion on templesolosmovies.com. Keep spoken replies conversational, clear, and concise.',
+        },
+        callbacks: {
+          onopen: () => {
+            if (!closed && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'ready', voice: requestedVoice }));
+            }
+          },
+          onmessage: (message: LiveServerMessage) => {
+            if (closed || clientWs.readyState !== WebSocket.OPEN) return;
+            const content = message.serverContent;
+            if (content?.inputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'input_transcript',
+                  text: content.inputTranscription.text,
+                })
+              );
+            }
+            if (content?.outputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'output_transcript',
+                  text: content.outputTranscription.text,
+                })
+              );
+            }
+            for (const part of content?.modelTurn?.parts ?? []) {
+              if (part.inlineData?.data) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'audio',
+                    data: part.inlineData.data,
+                  })
+                );
+              }
+            }
+            if (content?.interrupted) {
+              clientWs.send(JSON.stringify({ type: 'interrupted' }));
+            }
+            if (content?.turnComplete) {
+              clientWs.send(JSON.stringify({ type: 'turn_complete' }));
+            }
+          },
+          onerror: (err) => {
+            console.error('Gemini Live session error:', err);
+            if (!closed && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'error',
+                  message: 'Live voice session encountered a connection error.',
+                })
+              );
+            }
+          },
+          onclose: () => {
+            if (!closed && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'closed' }));
+              clientWs.close();
+            }
+          },
+        },
+      });
+    } catch (err) {
+      console.error('Failed to start Gemini Live session:', err);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(
+          JSON.stringify({
+            type: 'error',
+            message: err instanceof Error ? err.message : 'Unable to start live voice session.',
+          })
+        );
+        clientWs.close();
+      }
+      return;
+    }
+
+    clientWs.on('message', (raw) => {
+      if (closed || !liveSession) return;
+      try {
+        const msg = JSON.parse(raw.toString()) as { audio?: string; text?: string };
+        if (typeof msg.audio === 'string' && msg.audio.length > 0) {
+          liveSession.sendRealtimeInput({
+            audio: { data: msg.audio, mimeType: 'audio/pcm;rate=16000' },
+          });
+        } else if (typeof msg.text === 'string' && msg.text.trim()) {
+          liveSession.sendRealtimeInput({
+            text: msg.text.trim().slice(0, 1000),
+          });
+        }
+      } catch {
+        // Ignore malformed client audio packets
+      }
+    });
+
+    clientWs.on('close', () => {
+      closed = true;
+      try {
+        liveSession?.close();
+      } catch {
+        // Ignore cleanup errors
+      }
+      liveSession = null;
+    });
   });
 
   function sanitizePdfAscii(text: string): string {
@@ -1365,7 +2188,7 @@ import os, sys, zipfile
 
 root_dir = sys.argv[1]
 out_zip = sys.argv[2]
-exclude_dirs = {'node_modules', 'dist', '.git', '.next', '.cache', '__pycache__'}
+exclude_dirs = {'node_modules', 'dist', '.git', '.next', '.cache', '.gmp_cache', '__pycache__'}
 exclude_files = {'.env', '.env.local', '.env.production'}
 
 with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -1409,7 +2232,8 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     app.use(vite.middlewares);
   } else {
     const distDir = path.join(ROOT_DIR, 'dist');
-    app.use(express.static(distDir));
+    app.use('/assets', express.static(path.join(distDir, 'assets'), { maxAge: '30d', immutable: true }));
+    app.use(express.static(distDir, { maxAge: '1h', etag: true }));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
