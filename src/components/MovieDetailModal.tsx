@@ -37,6 +37,7 @@ import type {
 } from '../types/cinema';
 import { formatFileSize, formatPlaybackTime } from '../utils/format';
 import { generateSubtitleVttUrl } from '../utils/movieMetadata';
+import { getYouTubeEmbedUrl } from '../utils/youtube';
 import { BecauseYouWatchedRow } from './BecauseYouWatchedRow';
 import { MovieReviewsSection } from './MovieReviewsSection';
 
@@ -80,6 +81,7 @@ interface MovieDetailModalProps {
       director: string;
       country?: string;
       imdbRating?: number;
+      trailerUrl?: string;
       synopsis: string;
     }
   ) => Promise<void>;
@@ -186,6 +188,7 @@ export function MovieDetailModal({
   const [editDirector, setEditDirector] = useState('');
   const [editCountry, setEditCountry] = useState('');
   const [editImdbRating, setEditImdbRating] = useState('7.8');
+  const [editTrailerUrl, setEditTrailerUrl] = useState('');
   const [editSynopsis, setEditSynopsis] = useState('');
   const [resumedFromSeconds, setResumedFromSeconds] = useState(0);
 
@@ -372,6 +375,7 @@ export function MovieDetailModal({
       setEditDirector(movie.director);
       setEditCountry(movie.country || '');
       setEditImdbRating((movie.imdbRating ?? 7.8).toFixed(1));
+      setEditTrailerUrl(movie.trailerUrl || '');
       setEditSynopsis(movie.synopsis);
       setAudioLang(movie.audioLanguages?.[0] || 'English');
       setSubtitleLang('Off');
@@ -500,7 +504,9 @@ export function MovieDetailModal({
   if (!movie) return null;
 
   const baseVideoUrl = activeEpisode?.videoUrl || movie.videoUrl;
-  const effectiveVideoUrl = isTrailerMode ? movie.trailerUrl || baseVideoUrl : baseVideoUrl;
+  const youtubeEmbedUrl = getYouTubeEmbedUrl(movie.trailerUrl);
+  const youtubeAutoplayEmbedUrl = getYouTubeEmbedUrl(movie.trailerUrl, { autoplay: true });
+  const effectiveVideoUrl = isTrailerMode && !youtubeEmbedUrl ? movie.trailerUrl || baseVideoUrl : baseVideoUrl;
   const audioOptions = movie.audioLanguages?.length ? movie.audioLanguages : ['English', 'French', 'Spanish'];
   const subtitleOptions = movie.subtitleLanguages?.length
     ? movie.subtitleLanguages
@@ -601,6 +607,7 @@ export function MovieDetailModal({
       imdbRating: Number.isFinite(parsedImdb)
         ? Math.round(Math.min(10, Math.max(1, parsedImdb)) * 10) / 10
         : movie.imdbRating,
+      trailerUrl: editTrailerUrl.trim() || undefined,
       synopsis: editSynopsis.trim() || movie.synopsis,
     });
     setIsSavingEdit(false);
@@ -655,9 +662,20 @@ export function MovieDetailModal({
           </button>
         </div>
 
-        {/* Video Stream Player */}
+        {/* Video Stream Player (or YouTube Embed Player in Trailer Mode) */}
         <div ref={playerContainerRef} className="relative bg-[#09090B] border-b border-[#27272A]">
           <div className="relative">
+            {isTrailerMode && youtubeEmbedUrl ? (
+              <iframe
+                key={`yt-top-${youtubeEmbedUrl}`}
+                src={youtubeAutoplayEmbedUrl || youtubeEmbedUrl}
+                title={`${movie.title} Official Trailer`}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerPolicy="strict-origin-when-cross-origin"
+                allowFullScreen
+                className="w-full aspect-video max-h-[420px] border-0 bg-black"
+              />
+            ) : (
             <video
               ref={videoRef}
               key={`${effectiveVideoUrl}-${isTrailerMode ? 'trailer' : 'full'}`}
@@ -772,6 +790,7 @@ export function MovieDetailModal({
                 />
               )}
             </video>
+            )}
 
             {/* Primary Cinema Play Overlay (triggers playback + attempts landscape fullscreen on portrait mobile) */}
             {!hasStartedPlaying && !isPlaying && !isTrailerMode && (
@@ -1170,6 +1189,19 @@ export function MovieDetailModal({
 
               <div>
                 <label className="block text-xs font-medium text-[#D4D4D8] mb-1">
+                  Trailer URL (YouTube or Direct Video)
+                </label>
+                <input
+                  type="url"
+                  value={editTrailerUrl}
+                  onChange={(e) => setEditTrailerUrl(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  className="w-full rounded-lg border border-[#27272A] bg-[#111114] px-3 py-2 text-sm text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#D4D4D8] mb-1">
                   Synopsis
                 </label>
                 <textarea
@@ -1243,6 +1275,45 @@ export function MovieDetailModal({
               </p>
             </div>
           </div>
+
+          {/* Dedicated YouTube Embed Trailer Player when movie.trailerUrl is present */}
+          {youtubeEmbedUrl && !isTrailerMode && (
+            <section
+              aria-label="Official Trailer"
+              className="rounded-xl border border-[#27272A] bg-[#09090B] p-4 space-y-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Film className="h-4 w-4 text-[#E6A93C]" aria-hidden="true" />
+                  <h3 className="font-display text-sm font-bold text-[#FAFAFA]">
+                    Official Trailer
+                  </h3>
+                  <span className="rounded bg-[#E6A93C]/15 border border-[#E6A93C]/30 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#E6A93C]">
+                    YouTube
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsTrailerMode(true)}
+                  className="text-xs font-medium text-[#E6A93C] hover:underline cursor-pointer"
+                >
+                  Open in Top Player
+                </button>
+              </div>
+              <div className="aspect-video w-full overflow-hidden rounded-lg border border-[#27272A] bg-black">
+                <iframe
+                  key={`yt-section-${youtubeEmbedUrl}`}
+                  src={youtubeEmbedUrl}
+                  title={`${movie.title} Official Trailer`}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  referrerPolicy="strict-origin-when-cross-origin"
+                  allowFullScreen
+                  loading="lazy"
+                  className="h-full w-full border-0"
+                />
+              </div>
+            </section>
+          )}
 
           {/* 5-Star Rating Control */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-[#27272A] bg-[#09090B] px-4 py-3">

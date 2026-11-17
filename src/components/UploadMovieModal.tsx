@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Upload, X, Film, Image as ImageIcon, CheckCircle2 } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Film,
+  Image as ImageIcon,
+  Link as LinkIcon,
+  Upload,
+  X,
+} from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import type { Movie, MovieGenre, MovieQuality } from '../types/cinema';
 import { formatDurationSeconds, formatFileSize } from '../utils/format';
@@ -27,6 +35,193 @@ const GENRES: MovieGenre[] = [
 
 const QUALITIES: MovieQuality[] = ['4K UHD', '1080p HD', '720p HD'];
 
+const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+const CHUNK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB chunks stay safely below Cloud Run 32 MB limit
+const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov)$/i;
+const ALLOWED_VIDEO_MIMES = new Set([
+  'video/mp4',
+  'video/webm',
+  'video/x-matroska',
+  'video/matroska',
+  'video/quicktime',
+]);
+const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp)$/i;
+const ALLOWED_POSTER_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+
+function validateSelectedVideoFile(file: File): string | null {
+  const mime = (file.type || '').toLowerCase();
+  if (mime.startsWith('image/')) {
+    return 'Please choose a video file (images are not allowed here).';
+  }
+  const hasValidExt = ALLOWED_VIDEO_EXTS.test(file.name || '');
+  const hasValidMime = ALLOWED_VIDEO_MIMES.has(mime);
+  if (!hasValidExt && !hasValidMime) {
+    return 'Please choose a video file (MP4, WEBM, MKV, or MOV).';
+  }
+  if (file.size <= 0) {
+    return 'The selected video file is empty.';
+  }
+  if (file.size > MAX_VIDEO_BYTES) {
+    return `Video file is too large (${formatFileSize(file.size)}). Maximum allowed is 2 GB.`;
+  }
+  return null;
+}
+
+function validateSelectedPosterFile(file: File): string | null {
+  const mime = (file.type || '').toLowerCase();
+  const hasValidExt = ALLOWED_POSTER_EXTS.test(file.name || '');
+  const hasValidMime = ALLOWED_POSTER_MIMES.has(mime);
+  if (!hasValidExt && !hasValidMime) {
+    return 'Poster must be a JPG, PNG, or WEBP image file.';
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    return `Poster image is too large (${formatFileSize(file.size)}). Maximum allowed is 10 MB.`;
+  }
+  return null;
+}
+
+function mapHttpStatusFallback(status: number, rawText: string): string {
+  if (status === 413) {
+    return 'File is too large for this request (413 Payload Too Large). Try a smaller file.';
+  }
+  if (status === 401) {
+    return 'Administrator sign-in expired. Please log in again and retry.';
+  }
+  if (status === 403) {
+    return 'Only the administrator account can upload movies.';
+  }
+  if (status === 404) {
+    return 'Upload endpoint or session not found (404). Please retry.';
+  }
+  if (status >= 502 && status <= 504) {
+    return `Server gateway timeout or temporary unavailability (HTTP ${status}). Please try again.`;
+  }
+  const cleanSnippet = rawText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+  return cleanSnippet
+    ? `Upload failed (HTTP ${status}): ${cleanSnippet}`
+    : `Upload failed with server status HTTP ${status}.`;
+}
+
+async function parseJsonResponse<T>(res: Response): Promise<T> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const rawText = await res.text();
+
+  if (contentType.includes('application/json')) {
+    let parsed: (T & { error?: string }) | null = null;
+    try {
+      parsed = JSON.parse(rawText || '{}') as T & { error?: string };
+    } catch {
+      throw new Error(`Upload server returned malformed JSON (HTTP ${res.status}).`);
+    }
+    if (!res.ok) {
+      throw new Error(parsed?.error || mapHttpStatusFallback(res.status, rawText));
+    }
+    return parsed as T;
+  }
+
+  throw new Error(
+    res.ok
+      ? `Upload server returned non-JSON response (${contentType || 'unknown content type'}).`
+      : mapHttpStatusFallback(res.status, rawText)
+  );
+}
+
+function sendXhrFormData<T>(params: {
+  url: string;
+  formData: FormData;
+  token: string | null;
+  signal: AbortSignal;
+  onProgress?: (loaded: number, total: number) => void;
+}): Promise<T> {
+  const { url, formData, token, signal, onProgress } = params;
+
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+    };
+
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(message));
+    };
+
+    const onAbort = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // Ignore abort errors
+      }
+      fail('Upload cancelled.');
+    };
+
+    if (signal.aborted) {
+      fail('Upload cancelled.');
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    xhr.open('POST', url, true);
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(event.loaded, event.total);
+      }
+    };
+
+    xhr.onload = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+
+      const contentType = (xhr.getResponseHeader('content-type') || '').toLowerCase();
+      const rawText = xhr.responseText || '';
+
+      if (!contentType.includes('application/json')) {
+        reject(
+          new Error(
+            xhr.status >= 200 && xhr.status < 300
+              ? `Upload server returned non-JSON response (${contentType || 'text/html'}).`
+              : mapHttpStatusFallback(xhr.status, rawText)
+          )
+        );
+        return;
+      }
+
+      let parsed: (T & { error?: string }) | null = null;
+      try {
+        parsed = JSON.parse(rawText || '{}') as T & { error?: string };
+      } catch {
+        reject(new Error(`Upload server returned unreadable JSON (HTTP ${xhr.status}).`));
+        return;
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed as T);
+      } else {
+        reject(new Error(parsed?.error || mapHttpStatusFallback(xhr.status, rawText)));
+      }
+    };
+
+    xhr.onerror = () => {
+      fail('Network connection dropped while uploading. Check your internet connection and retry.');
+    };
+
+    xhr.onabort = () => {
+      fail('Upload cancelled.');
+    };
+
+    xhr.send(formData);
+  });
+}
+
 export function UploadMovieModal({
   isOpen,
   defaultUploader,
@@ -46,16 +241,21 @@ export function UploadMovieModal({
   const [uploader, setUploader] = useState(defaultUploader || 'TempleSolo');
   const [imdbRating, setImdbRating] = useState('7.8');
   const [country, setCountry] = useState('Nigeria');
-  const [category, setCategory] = useState<'Movies' | 'Series' | 'Music' | 'Anime' | 'Nollywood' | 'K-Drama'>('Movies');
+  const [category, setCategory] = useState<
+    'Movies' | 'Series' | 'Music' | 'Anime' | 'Nollywood' | 'K-Drama'
+  >('Movies');
+  const [trailerUrl, setTrailerUrl] = useState('');
   const [synopsis, setSynopsis] = useState('');
 
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatusText, setUploadStatusText] = useState('');
   const [error, setError] = useState('');
 
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const posterInputRef = useRef<HTMLInputElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (defaultUploader) {
@@ -74,9 +274,28 @@ export function UploadMovieModal({
     return () => window.removeEventListener('keydown', handleKey);
   }, [isOpen, isUploading, onClose]);
 
+  // Keep the browser tab alive and warn before closing mid-upload
+  useEffect(() => {
+    if (!isUploading) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = 'A movie upload is currently in progress. Leaving now will cancel the upload.';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isUploading]);
+
   if (!isOpen) return null;
 
   const inspectVideoFile = (file: File) => {
+    const validationError = validateSelectedVideoFile(file);
+    if (validationError) {
+      setError(validationError);
+      if (videoInputRef.current) videoInputRef.current.value = '';
+      return;
+    }
+
     setVideoFile(file);
     setError('');
 
@@ -141,11 +360,20 @@ export function UploadMovieModal({
   };
 
   const handlePosterSelect = (file: File) => {
+    const posterErr = validateSelectedPosterFile(file);
+    if (posterErr) {
+      setError(posterErr);
+      if (posterInputRef.current) posterInputRef.current.value = '';
+      return;
+    }
+    setError('');
+    if (posterPreviewUrl) URL.revokeObjectURL(posterPreviewUrl);
     setPosterFile(file);
     setPosterPreviewUrl(URL.createObjectURL(file));
   };
 
   const resetForm = () => {
+    if (posterPreviewUrl) URL.revokeObjectURL(posterPreviewUrl);
     setVideoFile(null);
     setPosterFile(null);
     setPosterPreviewUrl('');
@@ -158,33 +386,18 @@ export function UploadMovieModal({
     setImdbRating('7.8');
     setCountry('Nigeria');
     setCategory('Movies');
+    setTrailerUrl('');
     setSynopsis('');
     setUploadProgress(0);
+    setUploadStatusText('');
     setError('');
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!videoFile) {
-      setError('Please select a movie video file to upload.');
-      return;
-    }
-    if (!title.trim()) {
-      setError('Please enter a movie title.');
-      return;
-    }
+  const handleCancelUpload = () => {
+    abortControllerRef.current?.abort();
+  };
 
-    setError('');
-    setIsUploading(true);
-    setUploadProgress(0);
-
-    const token = await getIdToken();
-
-    const formData = new FormData();
-    formData.append('video', videoFile);
-    if (posterFile) {
-      formData.append('poster', posterFile);
-    }
+  const appendMetadataFields = (formData: FormData) => {
     formData.append('title', title.trim());
     formData.append('genre', genre);
     formData.append('year', year.trim() || String(new Date().getFullYear()));
@@ -195,48 +408,200 @@ export function UploadMovieModal({
     formData.append('imdbRating', imdbRating.trim() || '7.8');
     if (country.trim()) formData.append('country', country.trim());
     formData.append('category', category);
+    if (trailerUrl.trim()) formData.append('trailerUrl', trailerUrl.trim());
     formData.append('synopsis', synopsis.trim());
+  };
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/movies', true);
-    if (token) {
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!videoFile) {
+      setError('Please choose a video file to upload.');
+      return;
+    }
+    const videoValidationErr = validateSelectedVideoFile(videoFile);
+    if (videoValidationErr) {
+      setError(videoValidationErr);
+      return;
+    }
+    if (!title.trim()) {
+      setError('Please enter a movie title.');
+      return;
+    }
+    if (trailerUrl.trim() && !/^https?:\/\//i.test(trailerUrl.trim())) {
+      setError('Trailer URL must start with http:// or https://.');
+      return;
     }
 
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) {
-        const percent = Math.round((event.loaded / event.total) * 100);
-        setUploadProgress(percent);
+    const token = await getIdToken();
+    if (!token) {
+      setError('Please sign in with the administrator account to upload movies.');
+      return;
+    }
+
+    setError('');
+    setIsUploading(true);
+    setUploadProgress(0);
+    setUploadStatusText('Preparing upload...');
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    // Request Screen Wake Lock so mobile devices stay awake during large uploads
+    let wakeLock: { release?: () => Promise<void> } | null = null;
+    try {
+      const navWithWake = navigator as Navigator & {
+        wakeLock?: { request: (type: 'screen') => Promise<{ release?: () => Promise<void> }> };
+      };
+      if (navWithWake.wakeLock) {
+        wakeLock = await navWithWake.wakeLock.request('screen').catch(() => null);
       }
-    };
+    } catch {
+      wakeLock = null;
+    }
 
-    xhr.onload = () => {
-      setIsUploading(false);
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const parsed = JSON.parse(xhr.responseText) as { movie: Movie };
-          onUploaded(parsed.movie);
-          resetForm();
-          onClose();
-        } catch {
-          setError('Unexpected response from upload server.');
+    let createdUploadId: string | null = null;
+
+    try {
+      // Small videos <= 4 MB use single direct request; larger videos use 4 MB chunked transfer
+      if (videoFile.size <= CHUNK_SIZE_BYTES) {
+        setUploadStatusText('Uploading movie file...');
+        const formData = new FormData();
+        formData.append('video', videoFile);
+        if (posterFile) {
+          formData.append('poster', posterFile);
         }
-      } else {
-        try {
-          const errObj = JSON.parse(xhr.responseText) as { error?: string };
-          setError(errObj.error || 'Movie upload failed. Please try again.');
-        } catch {
-          setError('Movie upload failed. Please try again.');
+        appendMetadataFields(formData);
+
+        const parsed = await sendXhrFormData<{ movie: Movie }>({
+          url: '/api/movies',
+          formData,
+          token,
+          signal: controller.signal,
+          onProgress: (loaded, total) => {
+            if (total > 0) {
+              setUploadProgress(Math.min(99, Math.round((loaded / total) * 100)));
+            }
+          },
+        });
+        setUploadProgress(100);
+        onUploaded(parsed.movie);
+        resetForm();
+        onClose();
+        return;
+      }
+
+      // Chunked upload for files > 4 MB (handles up to 2 GB cleanly through reverse proxies)
+      const totalChunks = Math.ceil(videoFile.size / CHUNK_SIZE_BYTES);
+      const initRes = await fetch('/api/movies/chunked/init', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          fileName: videoFile.name,
+          mimeType: videoFile.type || 'video/mp4',
+          fileSizeBytes: videoFile.size,
+          totalChunks,
+        }),
+      });
+      const initData = await parseJsonResponse<{ uploadId: string }>(initRes);
+      createdUploadId = initData.uploadId;
+
+      for (let i = 0; i < totalChunks; i += 1) {
+        if (controller.signal.aborted) {
+          throw new Error('Upload cancelled.');
+        }
+
+        const start = i * CHUNK_SIZE_BYTES;
+        const end = Math.min(videoFile.size, start + CHUNK_SIZE_BYTES);
+        const chunkBlob = videoFile.slice(start, end);
+
+        let chunkSuccess = false;
+        let lastChunkError: Error | null = null;
+
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            setUploadStatusText(
+              attempt > 1
+                ? `Retrying part ${i + 1} of ${totalChunks} (attempt ${attempt})...`
+                : `Uploading part ${i + 1} of ${totalChunks}...`
+            );
+
+            const chunkForm = new FormData();
+            chunkForm.append('chunkIndex', String(i));
+            chunkForm.append('chunk', chunkBlob, `${videoFile.name}.part${i}`);
+
+            const freshToken = (await getIdToken()) || token;
+            await sendXhrFormData<{ received: boolean }>({
+              url: `/api/movies/chunked/${encodeURIComponent(createdUploadId)}/part?chunkIndex=${i}`,
+              formData: chunkForm,
+              token: freshToken,
+              signal: controller.signal,
+              onProgress: (loaded, total) => {
+                const chunkFraction = total > 0 ? loaded / total : 0;
+                const overallFraction = (i + chunkFraction) / totalChunks;
+                setUploadProgress(Math.min(95, Math.round(overallFraction * 95)));
+              },
+            });
+            chunkSuccess = true;
+            break;
+          } catch (chunkErr) {
+            if (controller.signal.aborted) {
+              throw chunkErr;
+            }
+            lastChunkError =
+              chunkErr instanceof Error ? chunkErr : new Error('Chunk upload failed.');
+            await new Promise((r) => setTimeout(r, 700 * attempt));
+          }
+        }
+
+        if (!chunkSuccess) {
+          throw lastChunkError || new Error(`Failed uploading part ${i + 1} of ${totalChunks}.`);
         }
       }
-    };
 
-    xhr.onerror = () => {
+      setUploadStatusText('Finalizing movie file on server...');
+      setUploadProgress(96);
+
+      const completeForm = new FormData();
+      if (posterFile) {
+        completeForm.append('poster', posterFile);
+      }
+      appendMetadataFields(completeForm);
+
+      const finalToken = (await getIdToken()) || token;
+      const completed = await sendXhrFormData<{ movie: Movie }>({
+        url: `/api/movies/chunked/${encodeURIComponent(createdUploadId)}/complete`,
+        formData: completeForm,
+        token: finalToken,
+        signal: controller.signal,
+      });
+
+      createdUploadId = null;
+      setUploadProgress(100);
+      setUploadStatusText('Upload complete!');
+      onUploaded(completed.movie);
+      resetForm();
+      onClose();
+    } catch (err) {
+      if (createdUploadId) {
+        void fetch(`/api/movies/chunked/${encodeURIComponent(createdUploadId)}/abort`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => {});
+      }
+      setError(err instanceof Error ? err.message : 'Movie upload failed. Please try again.');
+    } finally {
+      abortControllerRef.current = null;
       setIsUploading(false);
-      setError('Network error while uploading movie file.');
-    };
-
-    xhr.send(formData);
+      try {
+        await wakeLock?.release?.();
+      } catch {
+        // Ignore WakeLock release errors
+      }
+    }
   };
 
   return (
@@ -257,7 +622,7 @@ export function UploadMovieModal({
               Upload Movie to templesolosmovies.com
             </h2>
             <p className="text-xs text-[#A1A1AA] mt-0.5">
-              Add a movie file so visitors can stream previews and download copies.
+              Add a movie file (MP4, WEBM, MKV, MOV up to 2 GB) for streaming and download.
             </p>
           </div>
 
@@ -276,30 +641,32 @@ export function UploadMovieModal({
           {error && (
             <div
               role="alert"
-              className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-200"
+              className="flex items-start gap-2.5 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-200"
             >
-              {error}
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" aria-hidden="true" />
+              <span>{error}</span>
             </div>
           )}
 
           {/* Video File Dropzone */}
           <div>
             <label className="block text-xs font-medium text-[#D4D4D8] mb-2">
-              Movie Video File (MP4, MKV, WEBM, MOV, AVI)
+              Movie Video File (MP4, WEBM, MKV, MOV)
             </label>
             <div
               onDragOver={(e) => {
                 e.preventDefault();
-                setIsDragging(true);
+                if (!isUploading) setIsDragging(true);
               }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={(e) => {
                 e.preventDefault();
                 setIsDragging(false);
+                if (isUploading) return;
                 const dropped = e.dataTransfer.files?.[0];
                 if (dropped) inspectVideoFile(dropped);
               }}
-              onClick={() => videoInputRef.current?.click()}
+              onClick={() => !isUploading && videoInputRef.current?.click()}
               className={`flex flex-col items-center justify-center rounded-xl border border-dashed px-6 py-7 text-center transition-colors cursor-pointer ${
                 isDragging
                   ? 'border-[#E5A93B] bg-[#E5A93B]/10'
@@ -311,7 +678,7 @@ export function UploadMovieModal({
               <input
                 ref={videoInputRef}
                 type="file"
-                accept="video/*,.mkv,.avi,.mov,.mp4,.webm"
+                accept=".mp4,.webm,.mkv,.mov,video/mp4,video/webm,video/x-matroska,video/quicktime"
                 className="hidden"
                 onChange={(e) => {
                   const selected = e.target.files?.[0];
@@ -329,17 +696,17 @@ export function UploadMovieModal({
                     {videoFile.name}
                   </p>
                   <p className="text-xs font-mono tabular-nums text-[#A1A1AA] mt-1">
-                    {formatFileSize(videoFile.size)} · Click to choose a different file
+                    {formatFileSize(videoFile.size)} · Click to choose a different video
                   </p>
                 </>
               ) : (
                 <>
                   <Upload className="h-7 w-7 text-[#E5A93B] mb-2" aria-hidden="true" />
                   <p className="text-sm font-medium text-[#FAFAFA]">
-                    Drop a movie file here, or click to browse
+                    Drop a video file here, or click to browse
                   </p>
                   <p className="text-xs text-[#71717A] mt-1">
-                    Supports high-definition uploads up to 2 GB
+                    MP4, WEBM, MKV, or MOV · Chunked transfer supports up to 2 GB
                   </p>
                 </>
               )}
@@ -418,13 +785,13 @@ export function UploadMovieModal({
                 Poster Cover (Optional)
               </label>
               <div
-                onClick={() => posterInputRef.current?.click()}
+                onClick={() => !isUploading && posterInputRef.current?.click()}
                 className="relative flex aspect-[3/4] max-h-36 sm:max-h-full w-full flex-col items-center justify-center overflow-hidden rounded-lg border border-[#27272A] bg-[#09090B] hover:border-[#E5A93B] cursor-pointer"
               >
                 <input
                   ref={posterInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
@@ -444,7 +811,7 @@ export function UploadMovieModal({
                       aria-hidden="true"
                     />
                     <span className="block text-[11px] text-[#71717A]">
-                      Auto-captured or upload image
+                      Auto-captured or JPG/PNG/WEBP
                     </span>
                   </div>
                 )}
@@ -543,7 +910,7 @@ export function UploadMovieModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label
                 htmlFor="movie-country"
@@ -556,7 +923,7 @@ export function UploadMovieModal({
                 type="text"
                 value={country}
                 onChange={(e) => setCountry(e.target.value)}
-                placeholder="Nigeria, USA, UK, South Korea..."
+                placeholder="Nigeria, USA, UK..."
                 className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
               />
             </div>
@@ -567,19 +934,51 @@ export function UploadMovieModal({
               >
                 Catalog Category
               </label>
-                <select
-                  id="movie-category"
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value as 'Movies' | 'Series' | 'Music' | 'Anime' | 'Nollywood' | 'K-Drama')}
-                  className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none"
-                >
-                  <option value="Movies">Movies</option>
-                  <option value="Series">Series</option>
-                  <option value="Music">Music</option>
-                  <option value="Nollywood">Nollywood</option>
-                  <option value="Anime">Anime</option>
-                  <option value="K-Drama">K-Drama</option>
-                </select>
+              <select
+                id="movie-category"
+                value={category}
+                onChange={(e) =>
+                  setCategory(
+                    e.target.value as
+                      | 'Movies'
+                      | 'Series'
+                      | 'Music'
+                      | 'Anime'
+                      | 'Nollywood'
+                      | 'K-Drama'
+                  )
+                }
+                className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none"
+              >
+                <option value="Movies">Movies</option>
+                <option value="Series">Series</option>
+                <option value="Music">Music</option>
+                <option value="Nollywood">Nollywood</option>
+                <option value="Anime">Anime</option>
+                <option value="K-Drama">K-Drama</option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="movie-trailer-url"
+                className="block text-xs font-medium text-[#D4D4D8] mb-1.5"
+              >
+                Trailer URL (YouTube)
+              </label>
+              <div className="relative">
+                <LinkIcon
+                  className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#71717A]"
+                  aria-hidden="true"
+                />
+                <input
+                  id="movie-trailer-url"
+                  type="url"
+                  value={trailerUrl}
+                  onChange={(e) => setTrailerUrl(e.target.value)}
+                  placeholder="https://youtube.com/watch?v=..."
+                  className="w-full rounded-lg border border-[#27272A] bg-[#09090B] pl-9 pr-3 py-2 text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
+                />
+              </div>
             </div>
           </div>
 
@@ -603,37 +1002,49 @@ export function UploadMovieModal({
 
           {/* Upload Progress */}
           {isUploading && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs font-mono tabular-nums text-[#D4D4D8]">
-                <span>Uploading movie file to vault...</span>
-                <span>{uploadProgress}%</span>
+            <div className="rounded-lg border border-[#E5A93B]/30 bg-[#09090B] p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs font-mono tabular-nums text-[#FAFAFA]">
+                <span>{uploadStatusText || 'Uploading movie file to vault...'}</span>
+                <span className="text-[#E5A93B] font-bold">{uploadProgress}%</span>
               </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-[#27272A]">
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-[#27272A]">
                 <div
                   className="h-full bg-[#E5A93B] transition-all duration-150"
                   style={{ width: `${uploadProgress}%` }}
                 />
               </div>
+              <p className="text-[11px] text-[#A1A1AA]">
+                Keep this browser tab open until the upload finishes.
+              </p>
             </div>
           )}
 
           {/* Footer Buttons */}
           <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#27272A]">
-            <button
-              type="button"
-              disabled={isUploading}
-              onClick={onClose}
-              className="rounded-lg border border-[#27272A] bg-[#18181B] px-4 py-2 text-sm font-medium text-[#FAFAFA] hover:bg-[#27272A] disabled:opacity-40 cursor-pointer"
-            >
-              Cancel
-            </button>
+            {isUploading ? (
+              <button
+                type="button"
+                onClick={handleCancelUpload}
+                className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-200 hover:bg-red-500/20 cursor-pointer"
+              >
+                Cancel Upload
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg border border-[#27272A] bg-[#18181B] px-4 py-2 text-sm font-medium text-[#FAFAFA] hover:bg-[#27272A] cursor-pointer"
+              >
+                Cancel
+              </button>
+            )}
             <button
               type="submit"
               disabled={isUploading}
               className="inline-flex items-center gap-2 rounded-lg bg-[#E5A93B] px-5 py-2 text-sm font-semibold text-[#09090B] hover:bg-[#F0B84F] disabled:opacity-50 cursor-pointer"
             >
               <Film className="h-4 w-4" aria-hidden="true" />
-              <span>{isUploading ? 'Uploading...' : 'Publish Movie'}</span>
+              <span>{isUploading ? `Uploading (${uploadProgress}%)...` : 'Publish Movie'}</span>
             </button>
           </div>
         </form>

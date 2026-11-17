@@ -35,8 +35,7 @@ export interface SeriesEpisode {
   synopsis?: string;
 }
 
-export interface Movie {
-  id: string;
+export interface MovieMetadata {
   title: string;
   genre: MovieGenre;
   category?: Exclude<HomeCategoryChip, 'All'>;
@@ -45,13 +44,18 @@ export interface Movie {
   duration: string;
   quality: MovieQuality;
   director: string;
-  uploader: string;
   synopsis: string;
   imdbRating?: number;
   posterUrl: string;
   backdropUrl?: string;
   trailerUrl?: string;
   videoUrl: string;
+  ageRating?: string;
+}
+
+export interface Movie extends MovieMetadata {
+  id: string;
+  uploader: string;
   fileName: string;
   fileSizeBytes: number;
   mimeType: string;
@@ -60,7 +64,6 @@ export interface Movie {
   isSeeded?: boolean;
   ownerUid?: string;
   createdAt: string;
-  ageRating?: string;
   cloudinaryPublicId?: string;
   posterPublicId?: string;
   videoPublicId?: string;
@@ -80,6 +83,7 @@ export interface UpcomingMovie {
   director: string;
   synopsis: string;
   posterUrl: string;
+  trailerUrl?: string;
   subscriberCount: number;
   createdAt: string;
 }

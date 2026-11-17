@@ -991,6 +991,7 @@ export default function App() {
       director: string;
       country?: string;
       imdbRating?: number;
+      trailerUrl?: string;
       synopsis: string;
     }
   ) => {
@@ -998,6 +999,24 @@ export default function App() {
       showNotice('Only the administrator can edit movie details.');
       return;
     }
+    const customList = loadCustomMovies();
+    if (customList.some((m) => m.id === movieId)) {
+      const nextCustom = customList.map((m) =>
+        m.id === movieId ? enrichMovie({ ...m, ...updates }) : m
+      );
+      saveCustomMovies(nextCustom);
+      setMovies((prev) => {
+        const next = prev.map((m) => (m.id === movieId ? enrichMovie({ ...m, ...updates }) : m));
+        saveCachedMovies(next);
+        return next;
+      });
+      setSelectedMovie((prev) =>
+        prev && prev.id === movieId ? enrichMovie({ ...prev, ...updates }) : prev
+      );
+      showNotice('Movie details updated.');
+      return;
+    }
+
     const token = await getIdToken();
     const res = await fetch(`/api/movies/${encodeURIComponent(movieId)}`, {
       method: 'PATCH',

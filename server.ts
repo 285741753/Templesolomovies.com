@@ -32,6 +32,7 @@ const ROOT_DIR = process.cwd();
 const STORAGE_DIR = path.join(ROOT_DIR, 'storage');
 const MOVIES_DIR = path.join(STORAGE_DIR, 'movies');
 const POSTERS_DIR = path.join(STORAGE_DIR, 'posters');
+const CHUNKS_DIR = path.join(STORAGE_DIR, 'chunks');
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const DB_PATH = path.join(STORAGE_DIR, 'db.json');
 const FIREBASE_CONFIG_PATH = path.join(ROOT_DIR, 'firebase-applet-config.json');
@@ -148,7 +149,7 @@ async function isAdminUser(verifiedUser: VerifiedFirebaseUser | null): Promise<b
 }
 
 function ensureDirectories() {
-  for (const dir of [STORAGE_DIR, MOVIES_DIR, POSTERS_DIR]) {
+  for (const dir of [STORAGE_DIR, MOVIES_DIR, POSTERS_DIR, CHUNKS_DIR]) {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
@@ -214,6 +215,7 @@ interface SeedMovieSpec {
   sourceBackdropFile?: string;
   posterTargetName: string;
   backdropTargetName?: string;
+  trailerUrl?: string;
   videoFileName: string;
   downloads: number;
   featured: boolean;
@@ -727,6 +729,7 @@ function seedMetadataFast(db: DatabaseState): DatabaseState {
         imdbRating: spec.imdbRating,
         posterUrl: `/storage/posters/${spec.posterTargetName}`,
         backdropUrl,
+        ...(spec.trailerUrl ? { trailerUrl: spec.trailerUrl } : {}),
         videoUrl: `/storage/movies/${spec.videoFileName}`,
         fileName: spec.videoFileName,
         fileSizeBytes,
@@ -900,10 +903,15 @@ async function startServer() {
   const db = seedMetadataFast(loadDatabase());
 
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  // Compress JSON responses with Brotli or Gzip for fast loading on slow networks
+  // Compress GET JSON responses with Brotli or Gzip for fast loading on slow networks
   app.use((req, res, next) => {
+    if (req.method !== 'GET') {
+      next();
+      return;
+    }
     const origJson = res.json.bind(res);
     res.json = ((body: unknown) => {
       const jsonStr = JSON.stringify(body);
@@ -939,6 +947,9 @@ async function startServer() {
   app.use('/storage/movies', express.static(MOVIES_DIR, { maxAge: '1d', etag: true, lastModified: true }));
 
   const server = http.createServer(app);
+  // Prevent socket/request timeouts during large 2 GB movie uploads
+  server.requestTimeout = 0;
+  server.headersTimeout = 120_000;
   const wss = new WebSocketServer({ noServer: true });
   const liveWss = new WebSocketServer({ noServer: true });
 
@@ -1207,6 +1218,32 @@ async function startServer() {
     });
   });
 
+  const MAX_MOVIE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+  const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov)$/i;
+  const ALLOWED_VIDEO_MIMES = new Set([
+    'video/mp4',
+    'video/webm',
+    'video/x-matroska',
+    'video/matroska',
+    'video/quicktime',
+  ]);
+  const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp)$/i;
+  const ALLOWED_POSTER_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+
+  function isValidVideoUpload(fileName: string, mimeType: string): boolean {
+    const mime = (mimeType || '').toLowerCase();
+    if (mime.startsWith('image/')) return false;
+    return ALLOWED_VIDEO_MIMES.has(mime) || ALLOWED_VIDEO_EXTS.test(fileName || '');
+  }
+
+  function sanitizeHttpUrl(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const trimmed = raw.trim().slice(0, 500);
+    if (!trimmed) return undefined;
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return undefined;
+  }
+
   const storage = multer.diskStorage({
     destination: (_req, file, cb) => {
       if (file.fieldname === 'poster') {
@@ -1225,9 +1262,201 @@ async function startServer() {
   const upload = multer({
     storage,
     limits: {
-      fileSize: 2 * 1024 * 1024 * 1024,
+      fileSize: MAX_MOVIE_UPLOAD_BYTES,
+      fieldSize: 25 * 1024 * 1024,
+    },
+    fileFilter: (_req, file, cb) => {
+      if (file.fieldname === 'video') {
+        if (!isValidVideoUpload(file.originalname, file.mimetype)) {
+          const err = new Error('Please choose a video file (MP4, WEBM, MKV, or MOV).') as Error & {
+            status?: number;
+          };
+          err.status = 400;
+          cb(err);
+          return;
+        }
+      } else if (file.fieldname === 'poster') {
+        const mime = (file.mimetype || '').toLowerCase();
+        if (!ALLOWED_POSTER_MIMES.has(mime) && !ALLOWED_POSTER_EXTS.test(file.originalname || '')) {
+          const err = new Error('Poster must be a JPG, PNG, or WEBP image.') as Error & {
+            status?: number;
+          };
+          err.status = 400;
+          cb(err);
+          return;
+        }
+      }
+      cb(null, true);
     },
   });
+
+  const chunkUpload = multer({
+    storage: multer.diskStorage({
+      destination: (req, _file, cb) => {
+        const uploadId = sanitizeFilename(String(req.params.uploadId || '')).slice(0, 64);
+        const dir = path.join(CHUNKS_DIR, uploadId);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        cb(null, dir);
+      },
+      filename: (req, _file, cb) => {
+        const idx = Math.max(0, Number(req.body?.chunkIndex ?? req.query?.chunkIndex ?? 0) || 0);
+        cb(null, `part-${String(idx).padStart(6, '0')}`);
+      },
+    }),
+    limits: {
+      fileSize: 25 * 1024 * 1024,
+      fieldSize: 5 * 1024 * 1024,
+    },
+  });
+
+  interface PendingChunkUpload {
+    uploadId: string;
+    fileName: string;
+    fileSizeBytes: number;
+    mimeType: string;
+    totalChunks: number;
+    ownerUid?: string;
+    createdAt: number;
+  }
+
+  const pendingChunkUploads = new Map<string, PendingChunkUpload>();
+
+  async function finalizeUploadedMovie(params: {
+    videoFilePath: string;
+    videoUrlFilename: string;
+    originalFileName: string;
+    fileSizeBytes: number;
+    mimeType: string;
+    posterFile?: Express.Multer.File;
+    body: Record<string, unknown>;
+    verifiedUser?: VerifiedFirebaseUser;
+  }): Promise<Movie> {
+    const {
+      videoFilePath,
+      videoUrlFilename,
+      originalFileName,
+      fileSizeBytes,
+      mimeType,
+      posterFile,
+      body,
+      verifiedUser,
+    } = params;
+
+    const title = String(body.title || '').trim();
+    const rawGenre = String(body.genre || 'Drama') as MovieGenre;
+    const genre: MovieGenre = VALID_GENRES.includes(rawGenre) ? rawGenre : 'Drama';
+    const rawQuality = String(body.quality || '1080p HD') as MovieQuality;
+    const quality: MovieQuality = VALID_QUALITIES.includes(rawQuality) ? rawQuality : '1080p HD';
+    const year = Math.min(2030, Math.max(1900, Number(body.year) || new Date().getFullYear()));
+    const duration = String(body.duration || '1h 45m').trim() || '1h 45m';
+    const director = String(body.director || 'Independent').trim() || 'Independent';
+    const uploader =
+      verifiedUser?.displayName ||
+      String(body.uploader || 'TempleSolo Admin').trim() ||
+      'TempleSolo Admin';
+    const synopsis =
+      String(body.synopsis || '').trim() ||
+      `${title} uploaded to templesolosmovies.com by ${uploader}. Ready for instant streaming preview and direct file download.`;
+
+    let posterUrl = '/storage/posters/midnight_meridian_poster.jpg';
+    if (posterFile) {
+      const optimizedPath = await compressPosterImage(posterFile.path, 540);
+      posterUrl = `/storage/posters/${path.basename(optimizedPath)}`;
+    } else {
+      const extractedPosterName = `poster-${Date.now()}.jpg`;
+      const extractedPosterPath = path.join(POSTERS_DIR, extractedPosterName);
+      try {
+        await execFileAsync('ffmpeg', [
+          '-y',
+          '-ss',
+          '00:00:01',
+          '-i',
+          videoFilePath,
+          '-vframes',
+          '1',
+          '-vf',
+          "scale='min(540,iw)':-2",
+          '-q:v',
+          '5',
+          extractedPosterPath,
+        ]);
+        if (fs.existsSync(extractedPosterPath) && fs.statSync(extractedPosterPath).size > 0) {
+          posterUrl = `/storage/posters/${extractedPosterName}`;
+        }
+      } catch {
+        // Fallback silently
+      }
+    }
+
+    const rawImdb = Number(body.imdbRating);
+    const imdbRating =
+      Number.isFinite(rawImdb) && rawImdb >= 1 && rawImdb <= 10
+        ? Math.round(rawImdb * 10) / 10
+        : 7.8;
+
+    const country = String(body.country || '').trim().slice(0, 60) || undefined;
+    const rawCategory = String(body.category || '').trim();
+    const validCategories = ['Movies', 'Series', 'Music', 'Anime', 'Nollywood', 'K-Drama'];
+    const category = validCategories.includes(rawCategory)
+      ? (rawCategory as Movie['category'])
+      : undefined;
+    const trailerUrl = sanitizeHttpUrl(body.trailerUrl);
+
+    const movie: Movie = {
+      id: `movie-${randomUUID().slice(0, 8)}`,
+      title,
+      genre,
+      ...(category ? { category } : {}),
+      ...(country ? { country } : {}),
+      year,
+      duration,
+      quality,
+      director,
+      uploader,
+      synopsis,
+      imdbRating,
+      posterUrl,
+      ...(trailerUrl ? { trailerUrl } : {}),
+      videoUrl: `/storage/movies/${videoUrlFilename}`,
+      fileName: originalFileName || videoUrlFilename,
+      fileSizeBytes,
+      mimeType: mimeType || 'video/mp4',
+      downloads: 0,
+      featured: Boolean(body.featured === 'true' || body.featured === true),
+      isSeeded: false,
+      ownerUid: verifiedUser?.uid,
+      createdAt: new Date().toISOString(),
+    };
+
+    db.movies.unshift(movie);
+
+    const dropMessage: ChatMessage = {
+      id: `drop-${movie.id}`,
+      room: 'drops',
+      userId: verifiedUser?.uid || 'system-drops',
+      username: uploader,
+      text: `Uploaded "${movie.title}" (${movie.quality}) to the vault.`,
+      timestamp: new Date().toISOString(),
+      isSystem: true,
+      movieRef: {
+        id: movie.id,
+        title: movie.title,
+        genre: movie.genre,
+        year: movie.year,
+        quality: movie.quality,
+        posterUrl: movie.posterUrl,
+      },
+    };
+    db.messages.push(dropMessage);
+    saveDatabase(db);
+
+    broadcast({ type: 'movie:created', movie });
+    broadcast({ type: 'chat:message', message: dropMessage });
+
+    return movie;
+  }
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     const verifiedUser = await verifyFirebaseIdToken(req.headers.authorization);
@@ -1265,133 +1494,211 @@ async function startServer() {
         const posterFile = files?.poster?.[0];
 
         if (!videoFile) {
-          res.status(400).json({ error: 'Please select a movie video file to upload.' });
+          if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
+          res.status(400).json({ error: 'Please choose a video file to upload.' });
           return;
         }
 
         const title = String(req.body.title || '').trim();
         if (!title) {
-          fs.unlinkSync(videoFile.path);
-          if (posterFile) fs.unlinkSync(posterFile.path);
+          if (fs.existsSync(videoFile.path)) fs.unlinkSync(videoFile.path);
+          if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
           res.status(400).json({ error: 'Movie title is required.' });
           return;
         }
 
-        const rawGenre = String(req.body.genre || 'Drama') as MovieGenre;
-        const genre: MovieGenre = VALID_GENRES.includes(rawGenre) ? rawGenre : 'Drama';
-        const rawQuality = String(req.body.quality || '1080p HD') as MovieQuality;
-        const quality: MovieQuality = VALID_QUALITIES.includes(rawQuality) ? rawQuality : '1080p HD';
-        const year = Math.min(2030, Math.max(1900, Number(req.body.year) || new Date().getFullYear()));
-        const duration = String(req.body.duration || '1h 45m').trim() || '1h 45m';
-        const director = String(req.body.director || 'Independent').trim() || 'Independent';
-        const uploader =
-          verifiedUser?.displayName ||
-          String(req.body.uploader || 'TempleSolo Admin').trim() ||
-          'TempleSolo Admin';
-        const synopsis =
-          String(req.body.synopsis || '').trim() ||
-          `${title} uploaded to templesolosmovies.com by ${uploader}. Ready for instant streaming preview and direct file download.`;
-
-        let posterUrl = '/storage/posters/midnight_meridian_poster.jpg';
-        if (posterFile) {
-          const optimizedPath = await compressPosterImage(posterFile.path, 540);
-          posterUrl = `/storage/posters/${path.basename(optimizedPath)}`;
-        } else {
-          const extractedPosterName = `poster-${Date.now()}.jpg`;
-          const extractedPosterPath = path.join(POSTERS_DIR, extractedPosterName);
-          try {
-            await execFileAsync('ffmpeg', [
-              '-y',
-              '-ss',
-              '00:00:01',
-              '-i',
-              videoFile.path,
-              '-vframes',
-              '1',
-              '-vf',
-              "scale='min(540,iw)':-2",
-              '-q:v',
-              '5',
-              extractedPosterPath,
-            ]);
-            if (fs.existsSync(extractedPosterPath) && fs.statSync(extractedPosterPath).size > 0) {
-              posterUrl = `/storage/posters/${extractedPosterName}`;
-            }
-          } catch {
-            // Fallback silently
-          }
-        }
-
-        const rawImdb = Number(req.body.imdbRating);
-        const imdbRating =
-          Number.isFinite(rawImdb) && rawImdb >= 1 && rawImdb <= 10
-            ? Math.round(rawImdb * 10) / 10
-            : 7.8;
-
-        const country = String(req.body.country || '').trim().slice(0, 60) || undefined;
-        const rawCategory = String(req.body.category || '').trim();
-        const validCategories = ['Movies', 'Series', 'Music', 'Anime', 'Nollywood', 'K-Drama'];
-        const category = validCategories.includes(rawCategory)
-          ? (rawCategory as Movie['category'])
-          : undefined;
-
-        const movie: Movie = {
-          id: `movie-${randomUUID().slice(0, 8)}`,
-          title,
-          genre,
-          ...(category ? { category } : {}),
-          ...(country ? { country } : {}),
-          year,
-          duration,
-          quality,
-          director,
-          uploader,
-          synopsis,
-          imdbRating,
-          posterUrl,
-          videoUrl: `/storage/movies/${videoFile.filename}`,
-          fileName: videoFile.originalname || videoFile.filename,
+        const movie = await finalizeUploadedMovie({
+          videoFilePath: videoFile.path,
+          videoUrlFilename: videoFile.filename,
+          originalFileName: videoFile.originalname || videoFile.filename,
           fileSizeBytes: videoFile.size,
           mimeType: videoFile.mimetype || 'video/mp4',
-          downloads: 0,
-          featured: Boolean(req.body.featured === 'true'),
-          isSeeded: false,
-          ownerUid: verifiedUser?.uid,
-          createdAt: new Date().toISOString(),
-        };
-
-        db.movies.unshift(movie);
-
-        const dropMessage: ChatMessage = {
-          id: `drop-${movie.id}`,
-          room: 'drops',
-          userId: verifiedUser?.uid || 'system-drops',
-          username: uploader,
-          text: `Uploaded "${movie.title}" (${movie.quality}) to the vault.`,
-          timestamp: new Date().toISOString(),
-          isSystem: true,
-          movieRef: {
-            id: movie.id,
-            title: movie.title,
-            genre: movie.genre,
-            year: movie.year,
-            quality: movie.quality,
-            posterUrl: movie.posterUrl,
-          },
-        };
-        db.messages.push(dropMessage);
-        saveDatabase(db);
-
-        broadcast({ type: 'movie:created', movie });
-        broadcast({ type: 'chat:message', message: dropMessage });
+          posterFile,
+          body: req.body as Record<string, unknown>,
+          verifiedUser,
+        });
 
         res.status(201).json({ movie });
       } catch (err) {
-        console.error('Upload error:', err);
-        res.status(500).json({ error: 'Failed to process movie upload.' });
+        console.error('[Upload Error] Direct POST /api/movies failed:', err);
+        res.status(500).json({
+          error: err instanceof Error ? `Upload failed: ${err.message}` : 'Failed to process movie upload.',
+        });
       }
     }
   );
+
+  // Chunked upload pipeline (bypasses Cloud Run 32 MB single-request limit up to 2 GB)
+  app.post('/api/movies/chunked/init', requireAdmin, (req, res) => {
+    try {
+      const verifiedUser = res.locals.verifiedUser as VerifiedFirebaseUser | undefined;
+      const fileName = String(req.body?.fileName || '').trim();
+      const mimeType = String(req.body?.mimeType || '').trim();
+      const fileSizeBytes = Number(req.body?.fileSizeBytes || 0);
+      const totalChunks = Number(req.body?.totalChunks || 0);
+
+      if (!fileName || !isValidVideoUpload(fileName, mimeType)) {
+        res.status(400).json({ error: 'Please choose a video file (MP4, WEBM, MKV, or MOV).' });
+        return;
+      }
+      if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) {
+        res.status(400).json({ error: 'Selected video file is empty.' });
+        return;
+      }
+      if (fileSizeBytes > MAX_MOVIE_UPLOAD_BYTES) {
+        res.status(413).json({ error: 'Video file exceeds the 2 GB upload limit.' });
+        return;
+      }
+      if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > 1024) {
+        res.status(400).json({ error: 'Invalid upload chunk configuration.' });
+        return;
+      }
+
+      const uploadId = `chk-${randomUUID()}`;
+      const uploadDir = path.join(CHUNKS_DIR, uploadId);
+      fs.mkdirSync(uploadDir, { recursive: true });
+
+      pendingChunkUploads.set(uploadId, {
+        uploadId,
+        fileName,
+        fileSizeBytes,
+        mimeType: mimeType || 'video/mp4',
+        totalChunks,
+        ownerUid: verifiedUser?.uid,
+        createdAt: Date.now(),
+      });
+
+      res.status(201).json({ uploadId });
+    } catch (err) {
+      console.error('[Upload Error] Chunked init failed:', err);
+      res.status(500).json({ error: 'Could not initialize upload session.' });
+    }
+  });
+
+  app.post(
+    '/api/movies/chunked/:uploadId/part',
+    requireAdmin,
+    chunkUpload.single('chunk'),
+    (req, res) => {
+      const uploadId = String(req.params.uploadId || '').trim();
+      const session = pendingChunkUploads.get(uploadId);
+      if (!session) {
+        res.status(404).json({ error: 'Upload session not found or expired. Please retry upload.' });
+        return;
+      }
+      const chunkIndex = Number(req.body?.chunkIndex ?? req.query?.chunkIndex ?? -1);
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+        res.status(400).json({ error: 'Invalid chunk index.' });
+        return;
+      }
+      if (!req.file) {
+        res.status(400).json({ error: 'Chunk binary payload is missing.' });
+        return;
+      }
+      res.json({ received: true, chunkIndex });
+    }
+  );
+
+  app.post(
+    '/api/movies/chunked/:uploadId/complete',
+    requireAdmin,
+    upload.fields([{ name: 'poster', maxCount: 1 }]),
+    async (req, res) => {
+      const uploadId = sanitizeFilename(String(req.params.uploadId || '').trim()).slice(0, 64);
+      const session = pendingChunkUploads.get(uploadId);
+      const uploadDir = path.join(CHUNKS_DIR, uploadId);
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const posterFile = files?.poster?.[0];
+
+      const cleanupSession = () => {
+        pendingChunkUploads.delete(uploadId);
+        if (fs.existsSync(uploadDir)) {
+          fs.rmSync(uploadDir, { recursive: true, force: true });
+        }
+      };
+
+      if (!session) {
+        if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
+        cleanupSession();
+        res.status(404).json({ error: 'Upload session expired before completion. Please try again.' });
+        return;
+      }
+
+      const title = String(req.body?.title || '').trim();
+      if (!title) {
+        if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
+        cleanupSession();
+        res.status(400).json({ error: 'Movie title is required.' });
+        return;
+      }
+
+      const ext = path.extname(session.fileName) || '.mp4';
+      const base = sanitizeFilename(path.basename(session.fileName, ext)).slice(0, 60);
+      const finalFileName = `${Date.now()}-${base}${ext}`;
+      const finalFilePath = path.join(MOVIES_DIR, finalFileName);
+
+      try {
+        for (let i = 0; i < session.totalChunks; i += 1) {
+          const partPath = path.join(uploadDir, `part-${String(i).padStart(6, '0')}`);
+          if (!fs.existsSync(partPath)) {
+            if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
+            cleanupSession();
+            res.status(400).json({ error: `Missing upload chunk ${i + 1} of ${session.totalChunks}. Please retry.` });
+            return;
+          }
+        }
+
+        const outStream = fs.createWriteStream(finalFilePath);
+        for (let i = 0; i < session.totalChunks; i += 1) {
+          const partPath = path.join(uploadDir, `part-${String(i).padStart(6, '0')}`);
+          await new Promise<void>((resolve, reject) => {
+            const readStream = fs.createReadStream(partPath);
+            readStream.on('error', reject);
+            readStream.on('end', resolve);
+            readStream.pipe(outStream, { end: false });
+          });
+        }
+        await new Promise<void>((resolve, reject) => {
+          outStream.on('error', reject);
+          outStream.end(() => resolve());
+        });
+
+        const verifiedUser = res.locals.verifiedUser as VerifiedFirebaseUser | undefined;
+        const statSize = fs.existsSync(finalFilePath) ? fs.statSync(finalFilePath).size : session.fileSizeBytes;
+        const movie = await finalizeUploadedMovie({
+          videoFilePath: finalFilePath,
+          videoUrlFilename: finalFileName,
+          originalFileName: session.fileName,
+          fileSizeBytes: statSize,
+          mimeType: session.mimeType,
+          posterFile,
+          body: req.body as Record<string, unknown>,
+          verifiedUser,
+        });
+
+        cleanupSession();
+        res.status(201).json({ movie });
+      } catch (err) {
+        console.error('[Upload Error] Chunked complete failed:', err);
+        if (fs.existsSync(finalFilePath)) fs.unlinkSync(finalFilePath);
+        if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
+        cleanupSession();
+        res.status(500).json({
+          error: err instanceof Error ? `Failed to assemble uploaded movie: ${err.message}` : 'Failed to assemble uploaded movie.',
+        });
+      }
+    }
+  );
+
+  app.post('/api/movies/chunked/:uploadId/abort', requireAdmin, (req, res) => {
+    const uploadId = sanitizeFilename(String(req.params.uploadId || '').trim()).slice(0, 64);
+    pendingChunkUploads.delete(uploadId);
+    const uploadDir = path.join(CHUNKS_DIR, uploadId);
+    if (fs.existsSync(uploadDir)) {
+      fs.rmSync(uploadDir, { recursive: true, force: true });
+    }
+    res.json({ aborted: true });
+  });
 
   // Update movie metadata (admin content management only)
   app.patch('/api/movies/:id', requireAdmin, (req, res) => {
@@ -1430,6 +1737,9 @@ async function startServer() {
       if (Number.isFinite(parsedImdb)) {
         movie.imdbRating = Math.round(Math.min(10, Math.max(1, parsedImdb)) * 10) / 10;
       }
+    }
+    if (req.body.trailerUrl !== undefined) {
+      movie.trailerUrl = sanitizeHttpUrl(req.body.trailerUrl);
     }
 
     saveDatabase(db);
@@ -2560,6 +2870,42 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
       res.status(500).json({ error: 'Could not generate app zip archive.' });
     }
   });
+
+  // Guarantee every /api/* route returns JSON (never HTML fallback or Multer HTML error pages)
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  app.use(
+    '/api',
+    (
+      err: Error & { code?: string; status?: number; statusCode?: number },
+      req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      console.error(`[API Error] ${req.method} ${req.originalUrl}:`, err);
+      if (res.headersSent) return;
+
+      let status = err.status || err.statusCode || 500;
+      let message = err.message || 'Internal server error.';
+
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        status = 413;
+        message = 'File is too large for this endpoint (max 2 GB for videos).';
+      } else if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+        status = 400;
+        message = 'Unexpected upload field submitted.';
+      } else if (err.name === 'MulterError') {
+        status = 400;
+      } else if (err instanceof SyntaxError && 'body' in err) {
+        status = 400;
+        message = 'Invalid JSON request payload.';
+      }
+
+      res.status(status).json({ error: message });
+    }
+  );
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
