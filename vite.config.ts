@@ -12,8 +12,7 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: [
-          'app-icon.jpg',
-          'app-icon-full.png',
+          'icon.svg',
           'apple-touch-icon.png',
           'pwa-192x192.png',
           'pwa-512x512.png',
@@ -25,12 +24,18 @@ export default defineConfig(() => {
           short_name: 'TempleCinema',
           description:
             'Stream previews, download movies, save your watchlist, and chat live on templesolosmovies.com.',
-          theme_color: '#09090B',
-          background_color: '#09090B',
+          theme_color: '#0A0A0C',
+          background_color: '#0A0A0C',
           display: 'standalone',
           start_url: '/',
           scope: '/',
           icons: [
+            {
+              src: '/icon.svg',
+              sizes: 'any',
+              type: 'image/svg+xml',
+              purpose: 'any',
+            },
             {
               src: '/pwa-192x192.png',
               sizes: '192x192',
@@ -40,12 +45,6 @@ export default defineConfig(() => {
             {
               src: '/pwa-512x512.png',
               sizes: '512x512',
-              type: 'image/png',
-              purpose: 'any',
-            },
-            {
-              src: '/app-icon-full.png',
-              sizes: '1080x1080',
               type: 'image/png',
               purpose: 'any',
             },

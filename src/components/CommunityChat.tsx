@@ -127,7 +127,11 @@ export function CommunityChat({
               className={`inline-flex items-center gap-1.5 text-xs font-mono tabular-nums ${
                 isConnected ? 'text-emerald-400' : 'text-amber-400'
               }`}
-              title={isConnected ? 'WebSocket connected' : 'Reconnecting to chat server'}
+              title={
+                isConnected
+                  ? 'WebSocket live chat connected'
+                  : 'Using HTTP fallback sync while WebSocket reconnects'
+              }
             >
               <span
                 className={`h-2 w-2 rounded-full ${
@@ -142,7 +146,7 @@ export function CommunityChat({
               type="button"
               onClick={() => setShowUsers((prev) => !prev)}
               aria-expanded={showUsers}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[#27272A] bg-[#18181B] px-2.5 py-1 text-xs font-mono tabular-nums text-[#D4D4D8] hover:text-[#FAFAFA] cursor-pointer"
+              className="min-h-[36px] inline-flex items-center gap-1.5 rounded-md border border-[#27272A] bg-[#18181B] px-2.5 py-1 text-xs font-mono tabular-nums text-[#D4D4D8] hover:text-[#FAFAFA] cursor-pointer"
             >
               <Users className="h-3.5 w-3.5 text-[#E5A93B]" aria-hidden="true" />
               <span>{onlineUsers.length}</span>
@@ -159,7 +163,7 @@ export function CommunityChat({
                 key={room.id}
                 type="button"
                 onClick={() => onSwitchRoom(room.id)}
-                className={`flex-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                className={`min-h-[40px] flex-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                   active
                     ? 'bg-[#18181B] text-[#FAFAFA] shadow-sm'
                     : 'text-[#71717A] hover:text-[#D4D4D8]'

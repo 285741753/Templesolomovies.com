@@ -7,11 +7,47 @@
 }
 
 @layer base {
-  html {
+  html,
+  body {
     font-family: var(--font-sans);
-    background-color: #09090B;
+    background-color: #0A0A0C;
     color: #FAFAFA;
     scroll-behavior: smooth;
+    touch-action: manipulation;
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  * {
+    touch-action: manipulation;
+  }
+
+  input,
+  textarea,
+  select,
+  [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  button,
+  a,
+  img,
+  [role="button"] {
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+  }
+
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 
   h1, h2, h3, .font-display {

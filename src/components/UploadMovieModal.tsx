@@ -15,6 +15,7 @@ const GENRES: MovieGenre[] = [
   'Action',
   'Nollywood',
   'Sci-Fi',
+  'Music',
   'Drama',
   'Thriller',
   'Comedy',
@@ -44,6 +45,8 @@ export function UploadMovieModal({
   const [director, setDirector] = useState('');
   const [uploader, setUploader] = useState(defaultUploader || 'TempleSolo');
   const [imdbRating, setImdbRating] = useState('7.8');
+  const [country, setCountry] = useState('Nigeria');
+  const [category, setCategory] = useState<'Movies' | 'Series' | 'Music' | 'Anime' | 'Nollywood' | 'K-Drama'>('Movies');
   const [synopsis, setSynopsis] = useState('');
 
   const [isDragging, setIsDragging] = useState(false);
@@ -153,6 +156,8 @@ export function UploadMovieModal({
     setDuration('');
     setDirector('');
     setImdbRating('7.8');
+    setCountry('Nigeria');
+    setCategory('Movies');
     setSynopsis('');
     setUploadProgress(0);
     setError('');
@@ -188,6 +193,8 @@ export function UploadMovieModal({
     formData.append('director', director.trim() || 'Independent');
     formData.append('uploader', uploader.trim() || defaultUploader || 'Community');
     formData.append('imdbRating', imdbRating.trim() || '7.8');
+    if (country.trim()) formData.append('country', country.trim());
+    formData.append('category', category);
     formData.append('synopsis', synopsis.trim());
 
     const xhr = new XMLHttpRequest();
@@ -533,6 +540,46 @@ export function UploadMovieModal({
                 placeholder="Your name"
                 className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
               />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label
+                htmlFor="movie-country"
+                className="block text-xs font-medium text-[#D4D4D8] mb-1.5"
+              >
+                Country
+              </label>
+              <input
+                id="movie-country"
+                type="text"
+                value={country}
+                onChange={(e) => setCountry(e.target.value)}
+                placeholder="Nigeria, USA, UK, South Korea..."
+                className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="movie-category"
+                className="block text-xs font-medium text-[#D4D4D8] mb-1.5"
+              >
+                Catalog Category
+              </label>
+                <select
+                  id="movie-category"
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value as 'Movies' | 'Series' | 'Music' | 'Anime' | 'Nollywood' | 'K-Drama')}
+                  className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-sm text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none"
+                >
+                  <option value="Movies">Movies</option>
+                  <option value="Series">Series</option>
+                  <option value="Music">Music</option>
+                  <option value="Nollywood">Nollywood</option>
+                  <option value="Anime">Anime</option>
+                  <option value="K-Drama">K-Drama</option>
+                </select>
             </div>
           </div>
 

@@ -11,12 +11,14 @@ import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
 import type {
+  BrokenLinkReport,
   ChatMessage,
   ChatRoomId,
   ClientWsEvent,
   Movie,
   MovieGenre,
   MovieQuality,
+  MovieRequestItem,
   OnlineUser,
   ServerWsEvent,
   UpcomingMovie,
@@ -50,6 +52,8 @@ interface DatabaseState {
   messages: ChatMessage[];
   upcomingMovies: StoredUpcomingMovie[];
   releaseSubscriptions: ReleaseSubscription[];
+  movieRequests: MovieRequestItem[];
+  brokenLinkReports: BrokenLinkReport[];
 }
 
 interface FirebaseAppletConfig {
@@ -168,12 +172,23 @@ function loadDatabase(): DatabaseState {
         releaseSubscriptions: Array.isArray(parsed.releaseSubscriptions)
           ? parsed.releaseSubscriptions
           : [],
+        movieRequests: Array.isArray(parsed.movieRequests) ? parsed.movieRequests : [],
+        brokenLinkReports: Array.isArray(parsed.brokenLinkReports)
+          ? parsed.brokenLinkReports
+          : [],
       };
     } catch {
       // Fall back to fresh seed if JSON is corrupted
     }
   }
-  return { movies: [], messages: [], upcomingMovies: [], releaseSubscriptions: [] };
+  return {
+    movies: [],
+    messages: [],
+    upcomingMovies: [],
+    releaseSubscriptions: [],
+    movieRequests: [],
+    brokenLinkReports: [],
+  };
 }
 
 function saveDatabase(state: DatabaseState) {
@@ -186,6 +201,8 @@ interface SeedMovieSpec {
   id: string;
   title: string;
   genre: MovieGenre;
+  category?: Movie['category'];
+  country?: string;
   year: number;
   duration: string;
   quality: MovieQuality;
@@ -512,6 +529,27 @@ const SEED_SPECS: SeedMovieSpec[] = [
     featured: false,
     createdAt: '2026-11-13T16:45:00.000Z',
   },
+  {
+    id: 'movie-lagos-symphony-live',
+    title: 'Lagos Symphony: Live Sessions',
+    genre: 'Music',
+    category: 'Music',
+    country: 'Nigeria',
+    year: 2026,
+    duration: '1h 32m',
+    quality: '4K UHD',
+    director: 'Amara Okafor',
+    uploader: 'TempleSolo',
+    synopsis:
+      'Recorded live inside a candlelit concert hall, an acoustic collective blends orchestral brass, talking drums, and soaring vocal arrangements.',
+    imdbRating: 8.6,
+    sourcePosterFile: 'upcoming_copper_symphony_1794747752684.jpg',
+    posterTargetName: 'upcoming_copper_symphony.jpg',
+    videoFileName: 'lagos-symphony-live-4k.mp4',
+    downloads: 915,
+    featured: false,
+    createdAt: '2026-11-15T12:30:00.000Z',
+  },
 ];
 
 interface SeedUpcomingSpec {
@@ -640,6 +678,8 @@ function seedMetadataFast(db: DatabaseState): DatabaseState {
   const shouldBackfillShowcase =
     db.movies.length === 0 ||
     (!db.movies.some((m) => m.genre === 'Nollywood') &&
+      db.movies.every((m) => m.isSeeded)) ||
+    (!db.movies.some((m) => m.genre === 'Music' || m.category === 'Music') &&
       db.movies.every((m) => m.isSeeded));
 
   if (shouldBackfillShowcase) {
@@ -676,6 +716,8 @@ function seedMetadataFast(db: DatabaseState): DatabaseState {
         id: spec.id,
         title: spec.title,
         genre: spec.genre,
+        ...(spec.category ? { category: spec.category } : {}),
+        ...(spec.country ? { country: spec.country } : {}),
         year: spec.year,
         duration: spec.duration,
         quality: spec.quality,
@@ -806,6 +848,7 @@ const VALID_GENRES: MovieGenre[] = [
   'Action',
   'Nollywood',
   'Sci-Fi',
+  'Music',
   'Thriller',
   'Drama',
   'Mystery',
@@ -1285,10 +1328,19 @@ async function startServer() {
             ? Math.round(rawImdb * 10) / 10
             : 7.8;
 
+        const country = String(req.body.country || '').trim().slice(0, 60) || undefined;
+        const rawCategory = String(req.body.category || '').trim();
+        const validCategories = ['Movies', 'Series', 'Music', 'Anime', 'Nollywood', 'K-Drama'];
+        const category = validCategories.includes(rawCategory)
+          ? (rawCategory as Movie['category'])
+          : undefined;
+
         const movie: Movie = {
           id: `movie-${randomUUID().slice(0, 8)}`,
           title,
           genre,
+          ...(category ? { category } : {}),
+          ...(country ? { country } : {}),
           year,
           duration,
           quality,
@@ -1363,6 +1415,16 @@ async function startServer() {
     if (typeof req.body.director === 'string' && req.body.director.trim()) {
       movie.director = req.body.director.trim().slice(0, 80);
     }
+    if (typeof req.body.country === 'string') {
+      const nextCountry = req.body.country.trim().slice(0, 60);
+      movie.country = nextCountry || undefined;
+    }
+    if (typeof req.body.category === 'string') {
+      const validCategories = ['Movies', 'Series', 'Music', 'Anime', 'Nollywood', 'K-Drama'];
+      if (validCategories.includes(req.body.category.trim())) {
+        movie.category = req.body.category.trim() as Movie['category'];
+      }
+    }
     if (req.body.imdbRating !== undefined) {
       const parsedImdb = Number(req.body.imdbRating);
       if (Number.isFinite(parsedImdb)) {
@@ -1396,23 +1458,47 @@ async function startServer() {
       return;
     }
 
-    movie.downloads += 1;
-    saveDatabase(db);
-    broadcast({
-      type: 'movie:download_updated',
-      movieId: movie.id,
-      downloads: movie.downloads,
-    });
-
     const requestedQuality =
       typeof req.query.quality === 'string' &&
-      ['360p', '480p', '720p', '1080p'].includes(req.query.quality)
+      ['360p', '480p', '720p', '1080p', '4K'].includes(req.query.quality)
         ? req.query.quality
         : '480p';
     res.setHeader('X-Download-Quality', requestedQuality);
 
     const downloadName = sanitizeFilename(movie.fileName || `${movie.title}.mp4`);
-    res.download(fullPath, downloadName);
+    const stat = fs.statSync(fullPath);
+    const totalSize = stat.size;
+    const rangeHeader = req.headers.range;
+
+    if (!rangeHeader) {
+      movie.downloads += 1;
+      saveDatabase(db);
+      broadcast({
+        type: 'movie:download_updated',
+        movieId: movie.id,
+        downloads: movie.downloads,
+      });
+    }
+
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.setHeader('Content-Type', movie.mimeType || 'video/mp4');
+
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+      if (match) {
+        const start = Math.min(Number(match[1]) || 0, Math.max(0, totalSize - 1));
+        const end = match[2] ? Math.min(Number(match[2]), totalSize - 1) : totalSize - 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+        res.setHeader('Content-Length', String(end - start + 1));
+        fs.createReadStream(fullPath, { start, end }).pipe(res);
+        return;
+      }
+    }
+
+    res.setHeader('Content-Length', String(totalSize));
+    fs.createReadStream(fullPath).pipe(res);
   });
 
   app.delete('/api/movies/:id', requireAdmin, (req, res) => {
@@ -1445,6 +1531,50 @@ async function startServer() {
     const room = req.query.room as ChatRoomId | undefined;
     const messages = room ? db.messages.filter((m) => m.room === room) : db.messages;
     res.json({ messages: messages.slice(-200) });
+  });
+
+  app.post('/api/chat/messages', (req, res) => {
+    const allowedRooms: ChatRoomId[] = ['general', 'requests', 'drops'];
+    const rawRoom = String(req.body?.room || 'general').trim() as ChatRoomId;
+    const room: ChatRoomId = allowedRooms.includes(rawRoom) ? rawRoom : 'general';
+    const text = String(req.body?.text || '').trim().slice(0, 1000);
+    const movieRef = req.body?.movieRef && typeof req.body.movieRef === 'object'
+      ? req.body.movieRef
+      : undefined;
+
+    if (!text && !movieRef) {
+      res.status(400).json({ error: 'Message text is required.' });
+      return;
+    }
+
+    const messageId = String(req.body?.id || randomUUID()).trim().slice(0, 80);
+    const existing = db.messages.find((m) => m.id === messageId);
+    if (existing) {
+      res.json({ message: existing });
+      return;
+    }
+
+    const userId = String(req.body?.userId || `guest-${randomUUID().slice(0, 8)}`).trim().slice(0, 64);
+    const username = String(req.body?.username || 'MovieFan').trim().slice(0, 32) || 'MovieFan';
+
+    const message: ChatMessage = {
+      id: messageId,
+      room,
+      userId,
+      username,
+      text: text || `Shared ${movieRef?.title ?? 'a movie'}`,
+      timestamp: new Date().toISOString(),
+      ...(movieRef ? { movieRef } : {}),
+      likedBy: [],
+    };
+
+    db.messages.push(message);
+    if (db.messages.length > 500) {
+      db.messages = db.messages.slice(-500);
+    }
+    saveDatabase(db);
+    broadcast({ type: 'chat:message', message });
+    res.status(201).json({ message });
   });
 
   app.post('/api/chat/messages/:id/like', (req, res) => {
@@ -1668,17 +1798,175 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  function getGeminiClient(): GoogleGenAI | null {
+  // Request a Movie endpoints
+  app.get('/api/requests', (_req, res) => {
+    res.json({ requests: db.movieRequests });
+  });
+
+  app.post('/api/requests', (req, res) => {
+    const title = String(req.body?.title || '').trim().slice(0, 140);
+    if (!title) {
+      res.status(400).json({ error: 'Movie or series title is required.' });
+      return;
+    }
+    const rawYear = Number(req.body?.year);
+    const year =
+      Number.isFinite(rawYear) && rawYear >= 1900 && rawYear <= 2030 ? rawYear : undefined;
+    const country = String(req.body?.country || '').trim().slice(0, 60) || undefined;
+    const notes = String(req.body?.notes || '').trim().slice(0, 400) || undefined;
+    const requestedBy = String(req.body?.requestedBy || 'Guest Viewer').trim().slice(0, 60);
+
+    const entry: MovieRequestItem = {
+      id: `req-${randomUUID().slice(0, 8)}`,
+      title,
+      ...(year ? { year } : {}),
+      ...(country ? { country } : {}),
+      ...(notes ? { notes } : {}),
+      requestedBy,
+      upvotes: 1,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    db.movieRequests.unshift(entry);
+    if (db.movieRequests.length > 100) {
+      db.movieRequests = db.movieRequests.slice(0, 100);
+    }
+    saveDatabase(db);
+    res.status(201).json({ request: entry });
+  });
+
+  app.post('/api/requests/:id/upvote', (req, res) => {
+    const item = db.movieRequests.find((r) => r.id === req.params.id);
+    if (!item) {
+      res.status(404).json({ error: 'Request not found.' });
+      return;
+    }
+    item.upvotes += 1;
+    saveDatabase(db);
+    res.json({ request: item });
+  });
+
+  // Report Broken Link endpoints
+  app.get('/api/reports', requireAdmin, (_req, res) => {
+    res.json({ reports: db.brokenLinkReports });
+  });
+
+  app.post('/api/reports', (req, res) => {
+    const movieId = String(req.body?.movieId || '').trim().slice(0, 80);
+    const movieTitle = String(req.body?.movieTitle || '').trim().slice(0, 140);
+    const reason = String(req.body?.reason || '').trim().slice(0, 120);
+    const details = String(req.body?.details || '').trim().slice(0, 400) || undefined;
+    const reportedBy = String(req.body?.reportedBy || 'Viewer').trim().slice(0, 60);
+
+    if (!movieId || !movieTitle || !reason) {
+      res.status(400).json({ error: 'Movie and report reason are required.' });
+      return;
+    }
+
+    const report: BrokenLinkReport = {
+      id: `rep-${randomUUID().slice(0, 8)}`,
+      movieId,
+      movieTitle,
+      reason,
+      ...(details ? { details } : {}),
+      reportedBy,
+      status: 'open',
+      createdAt: new Date().toISOString(),
+    };
+    db.brokenLinkReports.unshift(report);
+    if (db.brokenLinkReports.length > 100) {
+      db.brokenLinkReports = db.brokenLinkReports.slice(0, 100);
+    }
+    saveDatabase(db);
+    res.status(201).json({ report });
+  });
+
+  app.patch('/api/reports/:id', requireAdmin, (req, res) => {
+    const report = db.brokenLinkReports.find((r) => r.id === req.params.id);
+    if (!report) {
+      res.status(404).json({ error: 'Report not found.' });
+      return;
+    }
+    report.status = req.body?.status === 'open' ? 'open' : 'resolved';
+    saveDatabase(db);
+    res.json({ report });
+  });
+
+  function getGeminiClient(apiVersion?: 'v1' | 'v1beta'): GoogleGenAI | null {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
     return new GoogleGenAI({
       apiKey,
+      ...(apiVersion ? { apiVersion } : {}),
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
         },
       },
     });
+  }
+
+  function extractGeminiError(err: unknown): { status: number; message: string } {
+    const rawMsg = err instanceof Error ? err.message : String(err || 'Gemini request failed.');
+    let parsedCode: number | undefined;
+    let parsedStatus = '';
+    let parsedMessage = rawMsg;
+
+    const jsonStart = rawMsg.indexOf('{');
+    if (jsonStart !== -1) {
+      try {
+        const parsed = JSON.parse(rawMsg.slice(jsonStart)) as {
+          error?: { code?: number; message?: string; status?: string };
+        };
+        if (parsed?.error) {
+          parsedCode = parsed.error.code;
+          parsedStatus = parsed.error.status || '';
+          if (parsed.error.message) {
+            parsedMessage = parsed.error.message;
+          }
+        }
+      } catch {
+        // Not valid JSON payload
+      }
+    }
+
+    const errStatus =
+      typeof (err as { status?: number })?.status === 'number'
+        ? (err as { status: number }).status
+        : parsedCode;
+
+    if (
+      errStatus === 429 ||
+      parsedStatus === 'RESOURCE_EXHAUSTED' ||
+      /RESOURCE_EXHAUSTED|quota exceeded/i.test(rawMsg)
+    ) {
+      return {
+        status: 429,
+        message:
+          'Gemini API quota exceeded for the current project key. Please check your Gemini API billing/quota in Settings > Secrets and try again.',
+      };
+    }
+
+    if (
+      errStatus === 403 ||
+      parsedStatus === 'PERMISSION_DENIED' ||
+      /API_KEY_INVALID|permission/i.test(rawMsg)
+    ) {
+      return {
+        status: 403,
+        message:
+          'Gemini API key does not have permission or is invalid. Verify GEMINI_API_KEY in Settings > Secrets.',
+      };
+    }
+
+    if (errStatus === 404 || parsedStatus === 'NOT_FOUND') {
+      return { status: 404, message: parsedMessage };
+    }
+
+    return {
+      status: errStatus && errStatus >= 400 && errStatus < 600 ? errStatus : 502,
+      message: parsedMessage.slice(0, 320),
+    };
   }
 
   const audioUpload = multer({
@@ -1693,8 +1981,9 @@ async function startServer() {
   });
 
   app.post('/api/ai/chat', async (req, res) => {
-    const ai = getGeminiClient();
-    if (!ai) {
+    const aiV1 = getGeminiClient();
+    const aiBeta = getGeminiClient('v1beta');
+    if (!aiV1 || !aiBeta) {
       res.status(503).json({
         error: 'Gemini API key is not configured on the server yet. Please check Settings > Secrets.',
       });
@@ -1724,46 +2013,74 @@ async function startServer() {
     }
     contents.push({ role: 'user', parts: [{ text: message }] });
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction:
-            'You are the Temple Cinema Concierge on templesolosmovies.com. Answer film, box-office, cast, cinema history, chess strategy, and movie-vault questions concisely and accurately, citing live web facts from Google Search when relevant.',
-          tools: [{ googleSearch: {} }],
-        },
-      });
+    const vaultSummary = db.movies
+      .slice(0, 20)
+      .map((m) => `${m.title} (${m.year}, ${m.genre}, Dir. ${m.director})`)
+      .join('; ');
 
-      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-      const seenUris = new Set<string>();
-      const sources: Array<{ title: string; uri: string }> = [];
-      for (const chunk of chunks) {
-        const uri = chunk?.web?.uri;
-        const title = chunk?.web?.title;
-        if (uri && !seenUris.has(uri)) {
-          seenUris.add(uri);
-          sources.push({
-            title: title || uri,
-            uri,
-          });
+    const systemInstruction =
+      `You are the Temple Cinema Concierge on templesolosmovies.com. Answer film, music, box-office, cast, cinema history, chess strategy, and movie-vault questions concisely and accurately, citing live web facts from Google Search when available. Current Temple Cinema vault highlights: ${vaultSummary}.`;
+
+    const attempts: Array<{
+      client: GoogleGenAI;
+      model: string;
+      useSearch: boolean;
+    }> = [
+      { client: aiV1, model: 'gemini-4-hydrogen', useSearch: true },
+      { client: aiV1, model: 'gemini-4-hydrogen', useSearch: false },
+      { client: aiBeta, model: 'gemini-3.1-flash-lite', useSearch: false },
+    ];
+
+    let lastErr: unknown = null;
+    for (const attempt of attempts) {
+      try {
+        const response = await attempt.client.models.generateContent({
+          model: attempt.model,
+          contents,
+          config: {
+            systemInstruction,
+            ...(attempt.useSearch ? { tools: [{ googleSearch: {} }] } : {}),
+          },
+        });
+
+        const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+        const seenUris = new Set<string>();
+        const sources: Array<{ title: string; uri: string }> = [];
+        for (const chunk of chunks) {
+          const uri = chunk?.web?.uri;
+          const title = chunk?.web?.title;
+          if (uri && !seenUris.has(uri)) {
+            seenUris.add(uri);
+            sources.push({
+              title: title || uri,
+              uri,
+            });
+          }
+        }
+
+        res.json({
+          reply: response.text || 'I could not generate a response for that query.',
+          sources,
+        });
+        return;
+      } catch (err) {
+        lastErr = err;
+        const parsed = extractGeminiError(err);
+        // Stop retrying only on invalid key / permission errors
+        if (parsed.status === 403) {
+          break;
         }
       }
-
-      res.json({
-        reply: response.text || 'I could not generate a response for that query.',
-        sources,
-      });
-    } catch (err) {
-      console.error('Gemini Search Chat error:', err);
-      const errMessage = err instanceof Error ? err.message : 'Failed to generate chat response.';
-      res.status(502).json({ error: errMessage });
     }
+
+    console.error('Gemini Search Chat error:', lastErr);
+    const extracted = extractGeminiError(lastErr);
+    res.status(extracted.status).json({ error: extracted.message });
   });
 
   app.post('/api/ai/transcribe', audioUpload.single('audio'), async (req, res) => {
-    const ai = getGeminiClient();
-    if (!ai) {
+    const aiBeta = getGeminiClient('v1beta');
+    if (!aiBeta) {
       res.status(503).json({
         error: 'Gemini API key is not configured on the server yet. Please check Settings > Secrets.',
       });
@@ -1786,41 +2103,55 @@ async function startServer() {
       return;
     }
 
+    const cleanMimeType = mimeType.split(';')[0].trim() || 'audio/webm';
+
     const promptText =
       typeof req.body?.prompt === 'string' && req.body.prompt.trim()
         ? req.body.prompt.trim().slice(0, 500)
         : 'Transcribe this audio accurately, preserving punctuation and speaker turns if discernible.';
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType,
-                data: base64Audio,
-              },
-            },
-            { text: promptText },
-          ],
-        },
-      });
+    const transcribeModels = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+    let lastErr: unknown = null;
 
-      res.json({
-        transcript: response.text || '',
-      });
-    } catch (err) {
-      console.error('Gemini Audio Transcription error:', err);
-      const errMessage = err instanceof Error ? err.message : 'Failed to transcribe audio.';
-      res.status(502).json({ error: errMessage });
+    for (const model of transcribeModels) {
+      try {
+        const response = await aiBeta.models.generateContent({
+          model,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: cleanMimeType,
+                  data: base64Audio,
+                },
+              },
+              { text: promptText },
+            ],
+          },
+        });
+
+        res.json({
+          transcript: response.text || '',
+        });
+        return;
+      } catch (err) {
+        lastErr = err;
+        const parsed = extractGeminiError(err);
+        if (parsed.status === 403) {
+          break;
+        }
+      }
     }
+
+    console.error('Gemini Audio Transcription error:', lastErr);
+    const extracted = extractGeminiError(lastErr);
+    res.status(extracted.status).json({ error: extracted.message });
   });
 
   const ALLOWED_LIVE_VOICES = new Set(['Zephyr', 'Kore', 'Puck', 'Charon', 'Fenrir']);
 
   liveWss.on('connection', async (clientWs, req) => {
-    const ai = getGeminiClient();
+    const ai = getGeminiClient('v1beta');
     if (!ai) {
       clientWs.send(
         JSON.stringify({
@@ -1905,17 +2236,29 @@ async function startServer() {
           },
           onerror: (err) => {
             console.error('Gemini Live session error:', err);
+            const extracted = extractGeminiError(
+              (err as { error?: unknown })?.error ?? (err as { message?: string })?.message ?? err
+            );
             if (!closed && clientWs.readyState === WebSocket.OPEN) {
               clientWs.send(
                 JSON.stringify({
                   type: 'error',
-                  message: 'Live voice session encountered a connection error.',
+                  message: extracted.message || 'Live voice session encountered a connection error.',
                 })
               );
             }
           },
-          onclose: () => {
+          onclose: (event) => {
             if (!closed && clientWs.readyState === WebSocket.OPEN) {
+              const reason = (event as { reason?: string })?.reason;
+              if (reason && /quota|resource_exhausted|permission|not found|unsupported/i.test(reason)) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'error',
+                    message: extractGeminiError(reason).message,
+                  })
+                );
+              }
               clientWs.send(JSON.stringify({ type: 'closed' }));
               clientWs.close();
             }
@@ -1924,11 +2267,12 @@ async function startServer() {
       });
     } catch (err) {
       console.error('Failed to start Gemini Live session:', err);
+      const extracted = extractGeminiError(err);
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(
           JSON.stringify({
             type: 'error',
-            message: err instanceof Error ? err.message : 'Unable to start live voice session.',
+            message: extracted.message || 'Unable to start live voice session.',
           })
         );
         clientWs.close();

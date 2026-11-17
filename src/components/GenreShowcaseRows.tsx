@@ -13,7 +13,19 @@ interface GenreShowcaseRowsProps {
   onSeeAllGenre: (genre: MovieGenre) => void;
 }
 
-const SHOWCASE_GENRES: MovieGenre[] = ['Action', 'Nollywood', 'Sci-Fi'];
+const SHOWCASE_GENRES: MovieGenre[] = [
+  'Action',
+  'Nollywood',
+  'Sci-Fi',
+  'Music',
+  'Thriller',
+  'Drama',
+  'Mystery',
+  'Comedy',
+  'Documentary',
+  'Animation',
+  'Horror',
+];
 
 function ShowcasePosterImage({ posterUrl, title }: { posterUrl: string; title: string }) {
   const [failed, setFailed] = useState(false);
@@ -130,7 +142,7 @@ export function GenreShowcaseRows({
                         </button>
 
                         <span className="rounded-md bg-[#09090B]/75 px-2 py-0.5 text-[10px] font-mono tabular-nums text-[#E4E4E7] border border-[#27272A]/70">
-                          • 16+
+                          • {movie.ageRating || '16+'}
                         </span>
                       </div>
 

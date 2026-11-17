@@ -7,11 +7,14 @@ import { useMovieReviews, type SubmitReviewInput } from './hooks/useMovieReviews
 import { useUpcomingNotifications } from './hooks/useUpcomingNotifications';
 import { useWatchProgress } from './hooks/useWatchProgress';
 import { isCellularConnection, useAppSettings } from './hooks/useAppSettings';
+import { useDownloadManager } from './hooks/useDownloadManager';
 import {
   WHATSAPP_CHANNEL_URL,
   type ChatMessage,
   type ChatRoomId,
   type ClientWsEvent,
+  type DownloadQualityTier,
+  type HomeCategoryChip,
   type Movie,
   type MovieChatReference,
   type MovieGenre,
@@ -21,24 +24,39 @@ import {
   type UpcomingMovie,
   type WatchPartyState,
 } from './types/cinema';
-import { triggerMovieDownload } from './utils/format';
-import { Header } from './components/Header';
+import { enrichMovie } from './utils/movieMetadata';
+import { Header, type AppMainView } from './components/Header';
 import { HeroSpotlight } from './components/HeroSpotlight';
+import { CategoryChipsBar, filterMoviesByCategory } from './components/CategoryChipsBar';
 import { ContinueWatchingRow } from './components/ContinueWatchingRow';
 import { GenreShowcaseRows } from './components/GenreShowcaseRows';
+import { NewReleasesRow } from './components/NewReleasesRow';
 import { BottomNavBar, type MobileNavTab } from './components/BottomNavBar';
 import { TrendingNow } from './components/TrendingNow';
 import { ComingSoon } from './components/ComingSoon';
 import { MovieGrid, type CollectionFilter } from './components/MovieGrid';
+import { DownloadsManagerPanel } from './components/DownloadsManagerPanel';
+import { BecauseYouWatchedRow } from './components/BecauseYouWatchedRow';
 import { CommunityChat } from './components/CommunityChat';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { TempleLogoIcon } from './components/TempleLogo';
 import type { UserWatchStats } from './components/MyStatsModal';
 
 const UploadMovieModal = lazy(() =>
   import('./components/UploadMovieModal').then((m) => ({ default: m.UploadMovieModal }))
 );
+const AdminUploadModal = lazy(() =>
+  import('./components/AdminUploadModal').then((m) => ({ default: m.AdminUploadModal }))
+);
+import type { AdminMovieUpdatePayload } from './components/AdminUploadModal';
 const MovieDetailModal = lazy(() =>
   import('./components/MovieDetailModal').then((m) => ({ default: m.MovieDetailModal }))
+);
+const DownloadQualityModal = lazy(() =>
+  import('./components/DownloadQualityModal').then((m) => ({ default: m.DownloadQualityModal }))
+);
+const RequestMovieModal = lazy(() =>
+  import('./components/RequestMovieModal').then((m) => ({ default: m.RequestMovieModal }))
 );
 const AuthModal = lazy(() =>
   import('./components/AuthModal').then((m) => ({ default: m.AuthModal }))
@@ -66,6 +84,89 @@ const CinemaLocationsMap = lazy(() =>
 );
 
 const MOVIES_CACHE_KEY = 'tsm_cached_movies_v1';
+const CUSTOM_MOVIES_KEY = 'tsm_custom_movies_v1';
+const CUSTOM_EDITS_KEY = 'tsm_custom_movie_edits_v1';
+const DELETED_MOVIE_IDS_KEY = 'tsm_deleted_movie_ids_v1';
+
+function loadCustomMovies(): Movie[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_MOVIES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as Movie[]).map(enrichMovie) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomMovies(movies: Movie[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CUSTOM_MOVIES_KEY, JSON.stringify(movies));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadCustomEdits(): Record<string, Partial<Movie>> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_EDITS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, Partial<Movie>>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCustomEdits(edits: Record<string, Partial<Movie>>) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CUSTOM_EDITS_KEY, JSON.stringify(edits));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadDeletedMovieIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = window.localStorage.getItem(DELETED_MOVIE_IDS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? new Set(parsed.filter((x): x is string => typeof x === 'string')) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDeletedMovieIds(ids: Set<string>) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(DELETED_MOVIE_IDS_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function mergeMoviesWithLocalPersistence(baseMovies: Movie[]): Movie[] {
+  const customMovies = loadCustomMovies();
+  const edits = loadCustomEdits();
+  const deletedIds = loadDeletedMovieIds();
+  const seen = new Set<string>();
+  const combined: Movie[] = [];
+
+  for (const item of [...customMovies, ...baseMovies]) {
+    if (!item || !item.id || deletedIds.has(item.id) || seen.has(item.id)) continue;
+    seen.add(item.id);
+    const patch = edits[item.id];
+    combined.push(enrichMovie(patch ? { ...item, ...patch } : item));
+  }
+
+  return combined;
+}
 
 interface NetworkInformationLike {
   saveData?: boolean;
@@ -90,11 +191,11 @@ function loadCachedMovies(): Movie[] {
   if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(MOVIES_CACHE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? (parsed as Movie[]) : [];
+    const base = raw ? ((JSON.parse(raw) as unknown) as Movie[]) : [];
+    const safeBase = Array.isArray(base) ? base.map(enrichMovie) : [];
+    return mergeMoviesWithLocalPersistence(safeBase);
   } catch {
-    return [];
+    return mergeMoviesWithLocalPersistence([]);
   }
 }
 
@@ -145,8 +246,10 @@ export default function App() {
     toggleSaveMovie,
     isMovieSaved,
     updateUserProfile,
+    logOut,
     getIdToken,
   } = useAuth();
+  const downloadManager = useDownloadManager();
   const { ratingsByMovie, rateMovie } = useMovieRatings(user?.uid);
   const {
     reviewsByMovie,
@@ -201,18 +304,24 @@ export default function App() {
   const [activeRoom, setActiveRoom] = useState<ChatRoomId>('general');
   const [collectionView, setCollectionView] = useState<CollectionFilter>('all');
   const [selectedGenre, setSelectedGenre] = useState<'All' | MovieGenre>('All');
+  const [homeCategory, setHomeCategory] = useState<HomeCategoryChip>('All');
   const [catalogSort, setCatalogSort] = useState<'newest' | 'imdb' | 'downloads' | 'title'>('newest');
+  const [mainView, setMainView] = useState<AppMainView>('home');
   const [mobileNavTab, setMobileNavTab] = useState<MobileNavTab>('home');
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [authModalState, setAuthModalState] = useState<{
     open: boolean;
     mode: 'login' | 'signup';
   }>({ open: false, mode: 'login' });
 
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
+  const [selectedMovieInitialTrailer, setSelectedMovieInitialTrailer] = useState(false);
+  const [downloadPickerMovie, setDownloadPickerMovie] = useState<Movie | null>(null);
+  const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [isStatsOpen, setIsStatsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isWatchPartyOpen, setIsWatchPartyOpen] = useState(false);
@@ -249,6 +358,16 @@ export default function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const activeUsernameRef = useRef(activeUsername);
+  const activeRoomRef = useRef(activeRoom);
+
+  useEffect(() => {
+    activeUsernameRef.current = activeUsername;
+  }, [activeUsername]);
+
+  useEffect(() => {
+    activeRoomRef.current = activeRoom;
+  }, [activeRoom]);
 
   const savedMovieIds = useMemo(
     () => new Set(savedMovies.map((m) => m.movieId)),
@@ -290,12 +409,16 @@ export default function App() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as { movies?: Movie[] };
         if (active && Array.isArray(data.movies)) {
-          setMovies(data.movies);
-          saveCachedMovies(data.movies);
+          const merged = mergeMoviesWithLocalPersistence(data.movies.map(enrichMovie));
+          setMovies(merged);
+          saveCachedMovies(merged);
           const sharedId = new URLSearchParams(window.location.search).get('movie');
           if (sharedId) {
-            const match = data.movies.find((m) => m.id === sharedId);
-            if (match) setSelectedMovie(match);
+            const match = merged.find((m) => m.id === sharedId);
+            if (match) {
+              setSelectedMovieInitialTrailer(false);
+              setSelectedMovie(match);
+            }
           }
         }
         if (active) setIsLoading(false);
@@ -315,12 +438,68 @@ export default function App() {
 
     void loadMovies(0);
 
+    const loadChatMessages = async () => {
+      try {
+        const res = await fetch('/api/chat/messages');
+        if (!res.ok) return;
+        const data = (await res.json()) as { messages?: ChatMessage[] };
+        if (active && Array.isArray(data.messages)) {
+          setMessages((prev) => {
+            if (prev.length === 0) return data.messages!;
+            const byId = new Map<string, ChatMessage>();
+            for (const m of prev) byId.set(m.id, m);
+            for (const m of data.messages!) byId.set(m.id, m);
+            return Array.from(byId.values())
+              .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+              .slice(-200);
+          });
+        }
+      } catch {
+        // Ignore transient chat load error; WebSocket / polling will retry
+      }
+    };
+
+    void loadChatMessages();
+
     return () => {
       active = false;
       activeController?.abort();
       if (retryTimer) window.clearTimeout(retryTimer);
     };
   }, []);
+
+  // Poll chat messages over HTTP while WebSocket is disconnected
+  useEffect(() => {
+    if (isConnected) return;
+    let cancelled = false;
+    const syncMessages = async () => {
+      if (cancelled || document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('/api/chat/messages');
+        if (!res.ok) return;
+        const data = (await res.json()) as { messages?: ChatMessage[] };
+        if (!cancelled && Array.isArray(data.messages)) {
+          setMessages((prev) => {
+            const byId = new Map<string, ChatMessage>();
+            for (const m of prev) byId.set(m.id, m);
+            for (const m of data.messages!) byId.set(m.id, m);
+            return Array.from(byId.values())
+              .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+              .slice(-200);
+          });
+        }
+      } catch {
+        // Ignore background poll errors
+      }
+    };
+    const interval = window.setInterval(() => {
+      void syncMessages();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [isConnected]);
 
   useEffect(() => {
     const key = user ? `tsm_watched_${user.uid}` : 'tsm_watched_guest';
@@ -404,8 +583,8 @@ export default function App() {
         const joinEvent: ClientWsEvent = {
           type: 'user:join',
           userId: activeUserId,
-          username: activeUsername,
-          room: activeRoom,
+          username: activeUsernameRef.current,
+          room: activeRoomRef.current,
         };
         socket.send(JSON.stringify(joinEvent));
       };
@@ -414,15 +593,17 @@ export default function App() {
         try {
           const data = JSON.parse(event.data) as ServerWsEvent;
           if (data.type === 'ws:init') {
-            setMovies(data.movies);
-            saveCachedMovies(data.movies);
+            const merged = mergeMoviesWithLocalPersistence(data.movies.map(enrichMovie));
+            setMovies(merged);
+            saveCachedMovies(merged);
             setMessages(data.messages);
             setOnlineUsers(data.onlineUsers);
             setIsLoading(false);
           } else if (data.type === 'movie:created') {
+            const enrichedMovie = enrichMovie(data.movie);
             setMovies((prev) => {
-              if (prev.some((m) => m.id === data.movie.id)) return prev;
-              const next = [data.movie, ...prev];
+              if (prev.some((m) => m.id === enrichedMovie.id)) return prev;
+              const next = [enrichedMovie, ...prev];
               saveCachedMovies(next);
               return next;
             });
@@ -600,15 +781,55 @@ export default function App() {
 
   const handleSendMessage = (text: string, movieRef?: MovieChatReference) => {
     const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    sendWs({
-      type: 'chat:send',
+    const optimistic: ChatMessage = {
       id,
       room: activeRoom,
       userId: activeUserId,
       username: activeUsername,
-      text,
+      text: text.trim() || `Shared ${movieRef?.title ?? 'a movie'}`,
+      timestamp: new Date().toISOString(),
       movieRef,
-    });
+      likedBy: [],
+    };
+
+    setMessages((prev) => (prev.some((m) => m.id === id) ? prev : [...prev, optimistic]));
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      sendWs({
+        type: 'chat:send',
+        id,
+        room: activeRoom,
+        userId: activeUserId,
+        username: activeUsername,
+        text,
+        movieRef,
+      });
+    } else {
+      void fetch('/api/chat/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          room: activeRoom,
+          userId: activeUserId,
+          username: activeUsername,
+          text,
+          movieRef,
+        }),
+      })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = (await res.json()) as { message?: ChatMessage };
+          if (data.message) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === id ? data.message! : m))
+            );
+          }
+        })
+        .catch(() => {
+          showNotice('Could not reach the chat server. Message queued locally.');
+        });
+    }
   };
 
   const handleToggleLikeMessage = (messageId: string) => {
@@ -655,13 +876,22 @@ export default function App() {
     }
   };
 
+  const handleOpenMovie = useCallback((movie: Movie, trailerMode = false) => {
+    setSelectedMovieInitialTrailer(trailerMode);
+    setSelectedMovie(movie);
+  }, []);
+
   const handleDownloadMovie = (movie: Movie) => {
+    setDownloadPickerMovie(movie);
+  };
+
+  const handleConfirmTierDownload = (movie: Movie, tier: DownloadQualityTier) => {
     if (settings.downloadWifiOnly && isCellularConnection()) {
       showNotice(t('settingsWifiBlockedNotice'));
       return;
     }
-    triggerMovieDownload(movie.id, settings.downloadQuality);
-    showNotice(`Downloading ${movie.title} (${settings.downloadQuality} · ${movie.fileName})`);
+    downloadManager.startDownload(movie, tier);
+    showNotice(`Downloading ${movie.title} (${tier}) — track progress in Downloads.`);
   };
 
   const handleDownloadById = (movieId: string) => {
@@ -671,7 +901,7 @@ export default function App() {
 
   const handleOpenById = (movieId: string) => {
     const found = movies.find((m) => m.id === movieId);
-    if (found) setSelectedMovie(found);
+    if (found) handleOpenMovie(found, false);
   };
 
   const handleShareToChat = (movie: Movie) => {
@@ -683,8 +913,11 @@ export default function App() {
       quality: movie.quality,
       posterUrl: movie.posterUrl,
     });
-    const chatEl = document.getElementById('community-chat');
-    chatEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    setMainView('lounge');
+    setMobileNavTab('lounge');
+    window.setTimeout(() => {
+      document.getElementById('community-chat')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 80);
   };
 
   const handleToggleSave = async (movie: Movie) => {
@@ -756,6 +989,7 @@ export default function App() {
       genre: MovieGenre;
       quality: MovieQuality;
       director: string;
+      country?: string;
       imdbRating?: number;
       synopsis: string;
     }
@@ -775,12 +1009,13 @@ export default function App() {
     });
     if (res.ok) {
       const data = (await res.json()) as { movie: Movie };
+      const enriched = enrichMovie(data.movie);
       setMovies((prev) => {
-        const next = prev.map((m) => (m.id === movieId ? data.movie : m));
+        const next = prev.map((m) => (m.id === movieId ? enriched : m));
         saveCachedMovies(next);
         return next;
       });
-      setSelectedMovie(data.movie);
+      setSelectedMovie(enriched);
       showNotice('Movie details updated.');
     } else {
       showNotice('Only the administrator can update movie details.');
@@ -810,25 +1045,198 @@ export default function App() {
   };
 
   const handleUploadedMovie = (movie: Movie) => {
+    const enriched = enrichMovie(movie);
     setMovies((prev) => {
-      if (prev.some((m) => m.id === movie.id)) return prev;
-      const next = [movie, ...prev];
+      if (prev.some((m) => m.id === enriched.id)) return prev;
+      const next = [enriched, ...prev];
       saveCachedMovies(next);
       return next;
     });
-    showNotice(`"${movie.title}" published to templesolosmovies.com!`);
+    showNotice(`"${enriched.title}" published to templesolosmovies.com!`);
   };
+
+  const handleCreateCloudinaryMovie = (movie: Movie) => {
+    const enriched = enrichMovie(movie);
+    const currentCustom = loadCustomMovies();
+    saveCustomMovies([enriched, ...currentCustom.filter((m) => m.id !== enriched.id)]);
+
+    const deletedIds = loadDeletedMovieIds();
+    if (deletedIds.has(enriched.id)) {
+      deletedIds.delete(enriched.id);
+      saveDeletedMovieIds(deletedIds);
+    }
+
+    setMovies((prev) => {
+      const next = [enriched, ...prev.filter((m) => m.id !== enriched.id)];
+      saveCachedMovies(next);
+      return next;
+    });
+  };
+
+  const handleAdminEditMovie = async (movieId: string, updates: AdminMovieUpdatePayload) => {
+    if (!isAdmin) return;
+    const customList = loadCustomMovies();
+    const isLocalCustom = customList.some((m) => m.id === movieId);
+
+    if (isLocalCustom) {
+      const nextCustom = customList.map((m) =>
+        m.id === movieId ? enrichMovie({ ...m, ...updates }) : m
+      );
+      saveCustomMovies(nextCustom);
+    } else {
+      const edits = loadCustomEdits();
+      edits[movieId] = { ...(edits[movieId] || {}), ...updates };
+      saveCustomEdits(edits);
+
+      try {
+        const token = await getIdToken();
+        if (token) {
+          await fetch(`/api/movies/${encodeURIComponent(movieId)}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(updates),
+          });
+        }
+      } catch {
+        // Keep localStorage override cleanly
+      }
+    }
+
+    setMovies((prev) => {
+      const next = prev.map((m) => (m.id === movieId ? enrichMovie({ ...m, ...updates }) : m));
+      saveCachedMovies(next);
+      return next;
+    });
+    setSelectedMovie((prev) =>
+      prev && prev.id === movieId ? enrichMovie({ ...prev, ...updates }) : prev
+    );
+  };
+
+  const handleAdminDeleteMovie = async (movieId: string) => {
+    if (!isAdmin) return;
+    const customList = loadCustomMovies();
+    const isLocalCustom = customList.some((m) => m.id === movieId);
+
+    if (isLocalCustom) {
+      saveCustomMovies(customList.filter((m) => m.id !== movieId));
+    } else {
+      const deletedIds = loadDeletedMovieIds();
+      deletedIds.add(movieId);
+      saveDeletedMovieIds(deletedIds);
+
+      try {
+        const token = await getIdToken();
+        if (token) {
+          await fetch(`/api/movies/${encodeURIComponent(movieId)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+          });
+        }
+      } catch {
+        // Keep localStorage deletion cleanly
+      }
+    }
+
+    setMovies((prev) => {
+      const next = prev.filter((m) => m.id !== movieId);
+      saveCachedMovies(next);
+      return next;
+    });
+    setSelectedMovie((prev) => (prev && prev.id === movieId ? null : prev));
+  };
+
+  const navigateToView = useCallback((view: AppMainView, anchorId?: string) => {
+    setMainView(view);
+    setMobileNavTab(view);
+    if (anchorId) {
+      window.setTimeout(() => {
+        document.getElementById(anchorId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 60);
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, []);
+
+  const handleGlobalSearchChange = useCallback((nextQuery: string) => {
+    setSearchQuery(nextQuery);
+    if (nextQuery.trim().length > 0) {
+      setMainView('search');
+      setMobileNavTab('search');
+    }
+  }, []);
 
   const scrollToChat = () => {
-    const el = document.getElementById('community-chat');
-    el?.scrollIntoView({ behavior: 'smooth' });
+    navigateToView('lounge', 'community-chat');
   };
 
-  const featuredMovie = movies.find((m) => m.featured) || movies[0];
+  const categoryFilteredMovies = useMemo(
+    () => filterMoviesByCategory(movies, homeCategory),
+    [movies, homeCategory]
+  );
+
+  const categoryContinueWatching = useMemo(() => {
+    if (homeCategory === 'All') return continueWatchingList;
+    const allowedIds = new Set(categoryFilteredMovies.map((m) => m.id));
+    return continueWatchingList.filter((entry) => allowedIds.has(entry.movieId));
+  }, [continueWatchingList, categoryFilteredMovies, homeCategory]);
+
   const totalDownloads = movies.reduce((sum, m) => sum + m.downloads, 0);
 
+  const savedMoviesList = useMemo(
+    () => movies.filter((m) => savedMovieIds.has(m.id)),
+    [movies, savedMovieIds]
+  );
+
+  const watchHistoryList = useMemo(() => {
+    const map = new Map(movies.map((m) => [m.id, m]));
+    const items: Array<{ movie: Movie; progress?: (typeof progressByMovie)[string]; order: number }> = [];
+    const seen = new Set<string>();
+
+    for (const entry of continueWatchingList) {
+      const m = map.get(entry.movieId);
+      if (m && !seen.has(m.id)) {
+        seen.add(m.id);
+        items.push({ movie: m, progress: entry, order: entry.updatedAtMs });
+      }
+    }
+    for (let i = watchedIds.length - 1; i >= 0; i -= 1) {
+      const id = watchedIds[i];
+      const m = map.get(id);
+      if (m && !seen.has(m.id)) {
+        seen.add(m.id);
+        items.push({ movie: m, progress: progressByMovie[id], order: i });
+      }
+    }
+    return items.map(({ movie, progress }) => ({ movie, progress }));
+  }, [movies, continueWatchingList, watchedIds, progressByMovie]);
+
+  const handleRemoveWatchHistory = useCallback(
+    (movieId: string) => {
+      void clearProgress(movieId);
+      setWatchedIds((prev) => {
+        const next = prev.filter((id) => id !== movieId);
+        const key = user ? `tsm_watched_${user.uid}` : 'tsm_watched_guest';
+        try {
+          localStorage.setItem(key, JSON.stringify(next));
+        } catch {
+          // Ignore storage error
+        }
+        return next;
+      });
+    },
+    [clearProgress, user]
+  );
+
+  const latestWatchedMovie = watchHistoryList[0]?.movie || savedMoviesList[0];
+  const activeDownloadsCount = downloadManager.tasks.filter(
+    (task) => task.status === 'downloading' || task.status === 'paused'
+  ).length;
+
   return (
-    <div className="min-h-screen bg-[#09090B] text-[#FAFAFA] flex flex-col">
+    <div className="min-h-screen bg-[#0A0A0C] text-[#FAFAFA] flex flex-col">
       {mapsQuotaExceeded && (
         <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
           <span>
@@ -847,11 +1255,14 @@ export default function App() {
       )}
 
       <Header
+        activeView={mainView}
         searchQuery={searchQuery}
         searchInputRef={searchInputRef}
         userStats={userWatchStats}
-        onSearchChange={setSearchQuery}
+        onSelectView={navigateToView}
+        onSearchChange={handleGlobalSearchChange}
         onOpenUpload={handleOpenUpload}
+        onOpenAdminPanel={() => setIsAdminPanelOpen(true)}
         onOpenAuth={(mode) => setAuthModalState({ open: true, mode })}
         onOpenStats={() => setIsStatsOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
@@ -891,249 +1302,451 @@ export default function App() {
         </div>
       )}
 
-      <main className="flex-1">
-        {isLoading && movies.length === 0 ? (
-          <div className="mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 text-center text-sm text-[#A1A1AA]">
-            Loading movie vault...
-          </div>
-        ) : (
+      <main className="flex-1 pb-20 lg:pb-6">
+        {mainView === 'home' && (
           <>
-            <HeroSpotlight
-              movie={featuredMovie}
-              totalMovies={movies.length}
-              totalDownloads={totalDownloads}
-              onlineCount={onlineUsers.length}
-              isAdmin={isAdmin}
-              isSaved={featuredMovie ? isMovieSaved(featuredMovie.id) : false}
-              onDownload={handleDownloadMovie}
-              onPreview={setSelectedMovie}
-              onToggleSave={handleToggleSave}
-              onStartWatchParty={handleStartMovieWatchParty}
-              onOpenUpload={handleOpenUpload}
-            />
-            <ContinueWatchingRow
-              movies={movies}
-              entries={continueWatchingList}
-              onResumeMovie={setSelectedMovie}
-              onRemoveProgress={(movieId) => void clearProgress(movieId)}
-            />
-            <GenreShowcaseRows
-              movies={movies}
-              savedMovieIds={savedMovieIds}
-              ratingsByMovie={ratingsByMovie}
-              onSelectMovie={setSelectedMovie}
-              onToggleSave={handleToggleSave}
-              onSeeAllGenre={(genre) => {
-                setCollectionView('all');
-                setSelectedGenre(genre);
-                document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            />
-            <TrendingNow
-              movies={movies}
-              onDownload={handleDownloadMovie}
-              onSelectMovie={setSelectedMovie}
-            />
+            {isLoading && movies.length === 0 ? (
+              <div className="mx-auto max-w-[1440px] px-4 py-20 sm:px-6 lg:px-8 text-center text-sm text-[#A1A1AA]">
+                Loading movie vault...
+              </div>
+            ) : (
+              <>
+                {/* 1. Auto-sliding hero banner carousel (5 featured titles, swipe, dots, Play & My List) */}
+                <HeroSpotlight
+                  movies={categoryFilteredMovies.length > 0 ? categoryFilteredMovies : movies}
+                  totalMovies={movies.length}
+                  totalDownloads={totalDownloads}
+                  onlineCount={onlineUsers.length}
+                  isAdmin={isAdmin}
+                  isMovieSaved={isMovieSaved}
+                  onDownload={handleDownloadMovie}
+                  onPreview={(m) => handleOpenMovie(m, false)}
+                  onWatchTrailer={(m) => handleOpenMovie(m, true)}
+                  onToggleSave={handleToggleSave}
+                  onStartWatchParty={handleStartMovieWatchParty}
+                  onOpenUpload={handleOpenUpload}
+                />
+
+                {/* 2. Category chips: All, Movies, Series, Anime, Nollywood, K-Drama */}
+                <CategoryChipsBar
+                  selectedCategory={homeCategory}
+                  onSelectCategory={setHomeCategory}
+                  filteredCount={categoryFilteredMovies.length}
+                />
+
+                {categoryFilteredMovies.length === 0 ? (
+                  <section className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8">
+                    <div className="rounded-2xl border border-[#27272A] bg-[#111114] p-8 text-center">
+                      <p className="font-display text-lg font-semibold text-[#FAFAFA] mb-2">
+                        No {homeCategory} titles in the vault yet
+                      </p>
+                      <p className="text-xs text-[#A1A1AA] mb-5">
+                        Switch back to All or explore Coming Soon releases below.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setHomeCategory('All')}
+                        className="min-h-[44px] inline-flex items-center justify-center rounded-xl bg-[#E6A93C] px-5 py-2 text-xs font-bold text-[#0A0A0C] hover:bg-[#F5C563] cursor-pointer"
+                      >
+                        {t('catAll')}
+                      </button>
+                    </div>
+                  </section>
+                ) : (
+                  <>
+                    {/* 3. Continue Watching */}
+                    <ContinueWatchingRow
+                      movies={categoryFilteredMovies}
+                      entries={categoryContinueWatching}
+                      onResumeMovie={(m) => handleOpenMovie(m, false)}
+                      onRemoveProgress={(movieId) => void clearProgress(movieId)}
+                    />
+
+                    {/* 4. Trending Now (top 5 most downloaded) */}
+                    <TrendingNow
+                      movies={categoryFilteredMovies}
+                      onDownload={handleDownloadMovie}
+                      onSelectMovie={(m) => handleOpenMovie(m, false)}
+                    />
+
+                    {/* 5. Genre rows (Action, Nollywood, Sci-Fi, etc.) */}
+                    <GenreShowcaseRows
+                      movies={categoryFilteredMovies}
+                      savedMovieIds={savedMovieIds}
+                      ratingsByMovie={ratingsByMovie}
+                      onSelectMovie={(m) => handleOpenMovie(m, false)}
+                      onToggleSave={handleToggleSave}
+                      onSeeAllGenre={(genre) => {
+                        setCollectionView('all');
+                        setSelectedGenre(genre);
+                        navigateToView('search', 'catalog');
+                      }}
+                    />
+
+                    {/* 6. New Releases */}
+                    <NewReleasesRow
+                      movies={categoryFilteredMovies}
+                      savedMovieIds={savedMovieIds}
+                      ratingsByMovie={ratingsByMovie}
+                      onSelectMovie={(m) => handleOpenMovie(m, false)}
+                      onDownload={handleDownloadMovie}
+                      onToggleSave={handleToggleSave}
+                      onSeeAll={() => {
+                        setCollectionView('all');
+                        setSelectedGenre('All');
+                        setCatalogSort('newest');
+                        navigateToView('search', 'catalog');
+                      }}
+                    />
+                  </>
+                )}
+
+                {/* 6 (cont). Coming Soon */}
+                <ComingSoon
+                  upcomingMovies={upcomingMovies}
+                  isLoading={isUpcomingLoading}
+                  error={upcomingError}
+                  subscribedIds={subscribedIdSet}
+                  effectiveEmail={effectiveEmail}
+                  isAdmin={isAdmin}
+                  onRetry={() => void retryUpcoming()}
+                  onSubscribe={async (release: UpcomingMovie, email?: string) => {
+                    const res = await subscribeToRelease(release, email);
+                    showNotice(`Release alert enabled for "${release.title}" (${res.email}).`);
+                  }}
+                  onUnsubscribe={async (release: UpcomingMovie) => {
+                    await unsubscribeFromRelease(release);
+                    showNotice(`Release alert removed for "${release.title}".`);
+                  }}
+                  onSubscribeAll={async (email?: string) => {
+                    const res = await subscribeToAllUpcoming(email);
+                    showNotice(`Subscribed ${res.email} to ${res.count} upcoming release alerts.`);
+                  }}
+                  onCreateUpcoming={async (input) => {
+                    const created = await createUpcomingRelease(input);
+                    showNotice(`Scheduled "${created.title}" in Coming Soon.`);
+                  }}
+                  onDeleteUpcoming={async (releaseId) => {
+                    await deleteUpcomingRelease(releaseId);
+                    showNotice('Removed upcoming release.');
+                  }}
+                />
+              </>
+            )}
           </>
         )}
 
-        <ComingSoon
-          upcomingMovies={upcomingMovies}
-          isLoading={isUpcomingLoading}
-          error={upcomingError}
-          subscribedIds={subscribedIdSet}
-          effectiveEmail={effectiveEmail}
-          isAdmin={isAdmin}
-          onRetry={() => void retryUpcoming()}
-          onSubscribe={async (release: UpcomingMovie, email?: string) => {
-            const res = await subscribeToRelease(release, email);
-            showNotice(`Release alert enabled for "${release.title}" (${res.email}).`);
-          }}
-          onUnsubscribe={async (release: UpcomingMovie) => {
-            await unsubscribeFromRelease(release);
-            showNotice(`Release alert removed for "${release.title}".`);
-          }}
-          onSubscribeAll={async (email?: string) => {
-            const res = await subscribeToAllUpcoming(email);
-            showNotice(`Subscribed ${res.email} to ${res.count} upcoming release alerts.`);
-          }}
-          onCreateUpcoming={async (input) => {
-            const created = await createUpcomingRelease(input);
-            showNotice(`Scheduled "${created.title}" in Coming Soon.`);
-          }}
-          onDeleteUpcoming={async (releaseId) => {
-            await deleteUpcomingRelease(releaseId);
-            showNotice('Removed upcoming release.');
-          }}
-        />
-
-        <div className="mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-8 py-4">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            <div className="lg:col-span-8">
-              <MovieGrid
-                movies={movies}
-                searchQuery={searchQuery}
-                onSearchChange={setSearchQuery}
-                selectedGenre={selectedGenre}
-                onSelectGenre={setSelectedGenre}
-                sortBy={catalogSort}
-                onChangeSortBy={setCatalogSort}
-                collectionView={collectionView}
-                savedMovieIds={savedMovieIds}
-                ratingsByMovie={ratingsByMovie}
-                reviewCountByMovie={reviewCountByMovie}
-                progressByMovie={progressByMovie}
-                currentUserId={user?.uid}
-                isAdmin={isAdmin}
-                onChangeCollectionView={handleSelectCollection}
-                onDownload={handleDownloadMovie}
-                onSelectMovie={setSelectedMovie}
-                onShareToChat={handleShareToChat}
-                onToggleSave={handleToggleSave}
-                onOpenUpload={handleOpenUpload}
-              />
-
-              <section
-                id="archive-info"
-                className="mt-4 mb-10 rounded-xl border border-[#27272A] bg-[#111114] p-6 sm:p-8"
+        {(mainView === 'search' || mainView === 'downloads') && (
+          <div className="mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-8 pt-5 pb-10">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => navigateToView('home', 'spotlight')}
+                className="min-h-[44px] inline-flex items-center gap-2 rounded-xl border border-[#27272A] bg-[#111114] px-4 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#E6A93C] hover:text-[#FAFAFA] transition-colors cursor-pointer"
               >
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-                  <div>
-                    <h2 className="font-display text-xl font-bold text-[#FAFAFA]">
-                      {t('howItWorksTitle')}
-                    </h2>
-                    <p className="text-sm text-[#A1A1AA] mt-1">
-                      {isAdmin ? t('howItWorksAdminDesc') : t('howItWorksViewerDesc')}
-                    </p>
-                  </div>
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={handleOpenUpload}
-                      className="inline-flex items-center gap-2 rounded-lg bg-[#E5A93B] px-4 py-2 text-xs font-semibold text-[#09090B] hover:bg-[#F0B84F] whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>{t('uploadAMovie')}</span>
-                    </button>
-                  )}
-                </div>
+                <span>← {t('navHome')}</span>
+              </button>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 border-t border-[#27272A] pt-6">
-                  <div>
-                    {isAdmin ? (
-                      <>
-                        <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1.5">
-                          <Upload className="h-4 w-4 text-[#E5A93B]" aria-hidden="true" />
-                          <span>{t('step1AdminTitle')}</span>
-                        </div>
-                        <p className="text-xs text-[#A1A1AA] leading-relaxed">
-                          {t('step1AdminDesc')}
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1.5">
-                          <Play className="h-4 w-4 text-[#E5A93B]" aria-hidden="true" />
-                          <span>{t('step1ViewerTitle')}</span>
-                        </div>
-                        <p className="text-xs text-[#A1A1AA] leading-relaxed">
-                          {t('step1ViewerDesc')}
-                        </p>
-                      </>
-                    )}
-                  </div>
-
-                  <div>
-                    <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1.5">
-                      <Download className="h-4 w-4 text-[#E5A93B]" aria-hidden="true" />
-                      <span>{t('step2Title')}</span>
-                    </div>
-                    <p className="text-xs text-[#A1A1AA] leading-relaxed">
-                      {t('step2Desc')}
-                    </p>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1.5">
-                      <MessageSquare className="h-4 w-4 text-[#E5A93B]" aria-hidden="true" />
-                      <span>{t('step3Title')}</span>
-                    </div>
-                    <p className="text-xs text-[#A1A1AA] leading-relaxed">
-                      {t('step3Desc')}
-                    </p>
-                  </div>
-                </div>
-              </section>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => navigateToView('search')}
+                  className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-semibold border cursor-pointer transition-colors ${
+                    mainView === 'search'
+                      ? 'border-[#E6A93C] bg-[#E6A93C] text-[#0A0A0C]'
+                      : 'border-[#27272A] bg-[#111114] text-[#D4D4D8]'
+                  }`}
+                >
+                  {t('navSearch')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCollectionView('all');
+                    setSelectedGenre('All');
+                    setCatalogSort('downloads');
+                    navigateToView('downloads');
+                  }}
+                  className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-semibold border cursor-pointer transition-colors ${
+                    mainView === 'downloads'
+                      ? 'border-[#E6A93C] bg-[#E6A93C] text-[#0A0A0C]'
+                      : 'border-[#27272A] bg-[#111114] text-[#D4D4D8]'
+                  }`}
+                >
+                  {t('navDownloads')}
+                </button>
+              </div>
             </div>
 
-            <div className="lg:col-span-4 pb-10">
-              <CommunityChat
-                messages={messages}
-                onlineUsers={onlineUsers}
-                isConnected={isConnected}
-                username={activeUsername}
-                userId={activeUserId}
-                activeRoom={activeRoom}
-                pendingMovieRef={pendingMovieRef}
-                movies={movies}
-                onSwitchRoom={handleSwitchRoom}
-                onRenameUser={handleRenameUser}
-                onSendMessage={handleSendMessage}
-                onToggleLikeMessage={handleToggleLikeMessage}
-                onClearPendingMovie={() => setPendingMovieRef(null)}
+            {mainView === 'downloads' && (
+              <DownloadsManagerPanel
+                tasks={downloadManager.tasks}
+                storageUsedBytes={downloadManager.storageUsedBytes}
+                onPause={downloadManager.pauseDownload}
+                onResume={downloadManager.resumeDownload}
+                onRemove={(id) => void downloadManager.removeDownload(id)}
                 onOpenMovieById={handleOpenById}
-                onDownloadMovieById={handleDownloadById}
               />
-            </div>
-          </div>
-        </div>
+            )}
 
-        <Suspense
-          fallback={
-            <div className="mx-auto max-w-[1440px] px-4 py-8 sm:px-6 lg:px-8 text-xs text-[#71717A]">
-              Loading interactive lounges...
+            {mainView === 'search' && latestWatchedMovie && (
+              <div className="mb-6">
+                <BecauseYouWatchedRow
+                  seedMovie={latestWatchedMovie}
+                  allMovies={movies}
+                  onSelectMovie={(m) => handleOpenMovie(m, false)}
+                />
+              </div>
+            )}
+
+            <MovieGrid
+              movies={movies}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              selectedGenre={selectedGenre}
+              onSelectGenre={setSelectedGenre}
+              sortBy={catalogSort}
+              onChangeSortBy={setCatalogSort}
+              collectionView={collectionView}
+              savedMovieIds={savedMovieIds}
+              ratingsByMovie={ratingsByMovie}
+              reviewCountByMovie={reviewCountByMovie}
+              progressByMovie={progressByMovie}
+              currentUserId={user?.uid}
+              isAdmin={isAdmin}
+              onChangeCollectionView={handleSelectCollection}
+              onDownload={handleDownloadMovie}
+              onSelectMovie={(m) => handleOpenMovie(m, false)}
+              onPlayTrailer={(m) => handleOpenMovie(m, true)}
+              onOpenRequestMovie={() => setIsRequestModalOpen(true)}
+              onShareToChat={handleShareToChat}
+              onToggleSave={handleToggleSave}
+              onOpenUpload={handleOpenUpload}
+            />
+          </div>
+        )}
+
+        {mainView === 'lounge' && (
+          <div id="lounge-hub">
+            <section className="border-b border-[#27272A] bg-[#0A0A0C]">
+              <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
+                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                  <div>
+                    <p className="font-mono text-[11px] uppercase tracking-widest text-[#E6A93C] mb-1">
+                      {t('loungeEyebrow')}
+                    </p>
+                    <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-[#FAFAFA]">
+                      {t('loungeTitle')}
+                    </h1>
+                    <p className="text-xs sm:text-sm text-[#A1A1AA] mt-1">
+                      {t('loungeSubtitle')}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => navigateToView('home', 'spotlight')}
+                    className="min-h-[44px] self-start sm:self-auto inline-flex items-center gap-2 rounded-xl border border-[#27272A] bg-[#111114] px-4 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#E6A93C] hover:text-[#FAFAFA] transition-colors cursor-pointer shrink-0"
+                  >
+                    <span>← {t('navHome')}</span>
+                  </button>
+                </div>
+
+                {/* Quick Lounge Section Anchors */}
+                <div className="mt-4 flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+                  {[
+                    { id: 'community-chat', label: t('navChat') },
+                    { id: 'chess-game', label: t('navChess') },
+                    { id: 'stage-3d', label: t('navStage3d') },
+                    { id: 'cinema-map', label: t('navMap') },
+                    { id: 'ai-studio', label: t('navStudio') },
+                  ].map((item) => (
+                    <a
+                      key={item.id}
+                      href={`#${item.id}`}
+                      className="min-h-[44px] inline-flex items-center rounded-xl border border-[#27272A] bg-[#111114] px-4 py-2 text-xs font-semibold text-[#D4D4D8] hover:border-[#E6A93C] hover:text-[#E6A93C] whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      {item.label}
+                    </a>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setIsWatchPartyOpen(true)}
+                    className="min-h-[44px] inline-flex items-center rounded-xl border border-[#E6A93C]/50 bg-[#E6A93C]/10 px-4 py-2 text-xs font-semibold text-[#E6A93C] hover:bg-[#E6A93C]/20 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                  >
+                    {t('navWatchParty')}
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            {/* Live Community Chat */}
+            <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                <div className="lg:col-span-7">
+                  <CommunityChat
+                    messages={messages}
+                    onlineUsers={onlineUsers}
+                    isConnected={isConnected}
+                    username={activeUsername}
+                    userId={activeUserId}
+                    activeRoom={activeRoom}
+                    pendingMovieRef={pendingMovieRef}
+                    movies={movies}
+                    onSwitchRoom={handleSwitchRoom}
+                    onRenameUser={handleRenameUser}
+                    onSendMessage={handleSendMessage}
+                    onToggleLikeMessage={handleToggleLikeMessage}
+                    onClearPendingMovie={() => setPendingMovieRef(null)}
+                    onOpenMovieById={handleOpenById}
+                    onDownloadMovieById={handleDownloadById}
+                  />
+                </div>
+
+                <div className="lg:col-span-5">
+                  <section
+                    id="archive-info"
+                    className="rounded-xl border border-[#27272A] bg-[#111114] p-6"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+                      <div>
+                        <h2 className="font-display text-lg font-bold text-[#FAFAFA]">
+                          {t('howItWorksTitle')}
+                        </h2>
+                        <p className="text-xs text-[#A1A1AA] mt-1">
+                          {isAdmin ? t('howItWorksAdminDesc') : t('howItWorksViewerDesc')}
+                        </p>
+                      </div>
+                      {isAdmin && (
+                        <button
+                          type="button"
+                          onClick={handleOpenUpload}
+                          className="min-h-[44px] inline-flex items-center gap-2 rounded-lg bg-[#E6A93C] px-4 py-2 text-xs font-semibold text-[#0A0A0C] hover:bg-[#F5C563] whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>{t('uploadAMovie')}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-4 border-t border-[#27272A] pt-5">
+                      <div>
+                        {isAdmin ? (
+                          <>
+                            <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1">
+                              <Upload className="h-4 w-4 text-[#E6A93C]" aria-hidden="true" />
+                              <span>{t('step1AdminTitle')}</span>
+                            </div>
+                            <p className="text-xs text-[#A1A1AA] leading-relaxed">
+                              {t('step1AdminDesc')}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1">
+                              <Play className="h-4 w-4 text-[#E6A93C]" aria-hidden="true" />
+                              <span>{t('step1ViewerTitle')}</span>
+                            </div>
+                            <p className="text-xs text-[#A1A1AA] leading-relaxed">
+                              {t('step1ViewerDesc')}
+                            </p>
+                          </>
+                        )}
+                      </div>
+
+                      <div>
+                        <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1">
+                          <Download className="h-4 w-4 text-[#E6A93C]" aria-hidden="true" />
+                          <span>{t('step2Title')}</span>
+                        </div>
+                        <p className="text-xs text-[#A1A1AA] leading-relaxed">
+                          {t('step2Desc')}
+                        </p>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center gap-2 text-sm font-semibold text-[#FAFAFA] mb-1">
+                          <MessageSquare className="h-4 w-4 text-[#E6A93C]" aria-hidden="true" />
+                          <span>{t('step3Title')}</span>
+                        </div>
+                        <p className="text-xs text-[#A1A1AA] leading-relaxed">
+                          {t('step3Desc')}
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
             </div>
-          }
-        >
-          <ChessLounge />
-          <CinemaAIStudio />
-          <CinemaStage3D />
-          <CinemaLocationsMap />
-        </Suspense>
+
+            <Suspense
+              fallback={
+                <div className="mx-auto max-w-[1440px] px-4 py-8 sm:px-6 lg:px-8 text-xs text-[#71717A]">
+                  Loading interactive lounges...
+                </div>
+              }
+            >
+              <ChessLounge />
+              <CinemaStage3D />
+              <CinemaLocationsMap />
+              <CinemaAIStudio />
+            </Suspense>
+          </div>
+        )}
       </main>
 
-      <footer className="border-t border-[#27272A] bg-[#09090B] pb-20 lg:pb-0">
+      <footer className="border-t border-[#27272A] bg-[#0A0A0C] pb-20 lg:pb-0">
         <div className="mx-auto flex max-w-[1440px] flex-col sm:flex-row items-center justify-between gap-4 px-4 py-6 sm:px-6 lg:px-8 text-xs text-[#71717A]">
           <div className="flex items-center gap-2.5 text-[#A1A1AA]">
-            <img
-              src="/app-icon-full.png"
-              alt="Temple Cinema icon"
-              className="h-7 w-7 rounded object-cover border border-[#E5A93B]/35"
-            />
-            <span className="font-medium text-[#E5A93B]">TEMPLE CINEMA</span>
+            <TempleLogoIcon className="h-7 w-7 shrink-0" />
+            <span className="font-medium text-[#E6A93C]">TEMPLE CINEMA</span>
             <span aria-hidden="true">·</span>
             <span>templesolosmovies.com</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-5">
-            <a href="#spotlight" className="hover:text-[#FAFAFA] transition-colors">
+            <button
+              type="button"
+              onClick={() => navigateToView('home', 'spotlight')}
+              className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
+            >
               {t('footerSpotlight')}
-            </a>
-            <a href="#catalog" className="hover:text-[#FAFAFA] transition-colors">
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToView('search', 'catalog')}
+              className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
+            >
               {t('navCatalog')}
-            </a>
-            <a href="#chess-game" className="hover:text-[#FAFAFA] transition-colors">
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToView('lounge', 'chess-game')}
+              className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
+            >
               {t('navChess')}
-            </a>
-            <a href="#ai-studio" className="hover:text-[#FAFAFA] transition-colors">
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToView('lounge', 'ai-studio')}
+              className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
+            >
               {t('navStudio')}
-            </a>
-            <a href="#stage-3d" className="hover:text-[#FAFAFA] transition-colors">
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToView('lounge', 'stage-3d')}
+              className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
+            >
               {t('navStage3d')}
-            </a>
-            <a href="#cinema-map" className="hover:text-[#FAFAFA] transition-colors">
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToView('lounge', 'cinema-map')}
+              className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
+            >
               {t('navMap')}
-            </a>
+            </button>
             <button
               type="button"
               onClick={() => setIsWatchPartyOpen(true)}
@@ -1182,7 +1795,10 @@ export default function App() {
           <AuthModal
             isOpen={authModalState.open}
             initialMode={authModalState.mode}
-            onClose={() => setAuthModalState((prev) => ({ ...prev, open: false }))}
+            onClose={() => {
+              setAuthModalState((prev) => ({ ...prev, open: false }));
+              setMobileNavTab(mainView);
+            }}
             onSuccess={showNotice}
           />
         )}
@@ -1196,9 +1812,24 @@ export default function App() {
           />
         )}
 
+        {isAdmin && isAdminPanelOpen && (
+          <AdminUploadModal
+            isOpen={isAdminPanelOpen}
+            movies={movies}
+            defaultUploader={activeUsername}
+            onClose={() => setIsAdminPanelOpen(false)}
+            onCreateMovie={handleCreateCloudinaryMovie}
+            onEditMovie={handleAdminEditMovie}
+            onDeleteMovie={handleAdminDeleteMovie}
+            onNotify={showNotice}
+          />
+        )}
+
         {selectedMovie && (
           <MovieDetailModal
             movie={selectedMovie}
+            allMovies={movies}
+            initialTrailerMode={selectedMovieInitialTrailer}
             isSaved={isMovieSaved(selectedMovie.id)}
             canManage={Boolean(isAdmin && selectedMovie)}
             isAuthenticated={Boolean(user)}
@@ -1216,12 +1847,14 @@ export default function App() {
             onClearProgress={(id) => void clearProgress(id)}
             onClose={() => {
               setSelectedMovie(null);
+              setSelectedMovieInitialTrailer(false);
               if (new URLSearchParams(window.location.search).has('movie')) {
                 const nextUrl = new URL(window.location.href);
                 nextUrl.searchParams.delete('movie');
                 window.history.replaceState({}, '', nextUrl.pathname + nextUrl.search + nextUrl.hash);
               }
             }}
+            onSelectMovie={(m) => handleOpenMovie(m, false)}
             onDownload={handleDownloadMovie}
             onShareToChat={handleShareToChat}
             onStartWatchParty={handleStartMovieWatchParty}
@@ -1240,12 +1873,57 @@ export default function App() {
           />
         )}
 
+        {downloadPickerMovie && (
+          <DownloadQualityModal
+            movie={downloadPickerMovie}
+            defaultQuality={settings.downloadQuality}
+            isWifiBlocked={settings.downloadWifiOnly && isCellularConnection()}
+            onConfirm={handleConfirmTierDownload}
+            onClose={() => setDownloadPickerMovie(null)}
+          />
+        )}
+
+        {isRequestModalOpen && (
+          <RequestMovieModal
+            isOpen={isRequestModalOpen}
+            requesterName={activeUsername}
+            onSubmitted={(title) =>
+              showNotice(`Requested "${title}" — added to the community queue!`)
+            }
+            onClose={() => setIsRequestModalOpen(false)}
+          />
+        )}
+
         {isStatsOpen && (
           <MyStatsModal
             isOpen={isStatsOpen}
             displayName={activeUsername}
+            email={user?.email}
+            isAuthenticated={Boolean(user)}
+            isAdmin={Boolean(isAdmin)}
             stats={userWatchStats}
-            onClose={() => setIsStatsOpen(false)}
+            allMovies={movies}
+            savedMoviesList={savedMoviesList}
+            watchHistoryList={watchHistoryList}
+            downloadTasks={downloadManager.tasks}
+            storageUsedBytes={downloadManager.storageUsedBytes}
+            onSelectMovie={(m) => handleOpenMovie(m, false)}
+            onToggleSave={handleToggleSave}
+            onRemoveHistory={handleRemoveWatchHistory}
+            onOpenDownloads={() => navigateToView('downloads', 'catalog')}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenRequestMovie={() => setIsRequestModalOpen(true)}
+            onOpenAuth={() => setAuthModalState({ open: true, mode: 'login' })}
+            onLogOut={() => {
+              void logOut().then(() => {
+                setCollectionView('all');
+                showNotice('You have logged out.');
+              });
+            }}
+            onClose={() => {
+              setIsStatsOpen(false);
+              setMobileNavTab(mainView);
+            }}
           />
         )}
 
@@ -1281,31 +1959,28 @@ export default function App() {
 
       <BottomNavBar
         activeTab={mobileNavTab}
+        activeDownloadsCount={activeDownloadsCount}
         onSelectHome={() => {
-          setMobileNavTab('home');
           setCollectionView('all');
           setSelectedGenre('All');
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          navigateToView('home', 'spotlight');
         }}
         onSelectSearch={() => {
-          setMobileNavTab('search');
-          searchInputRef.current?.focus();
-          document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' });
+          navigateToView('search', 'catalog');
+          window.setTimeout(() => searchInputRef.current?.focus(), 80);
         }}
         onSelectDownloads={() => {
-          setMobileNavTab('downloads');
           setCollectionView('all');
           setSelectedGenre('All');
           setCatalogSort('downloads');
-          document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' });
+          navigateToView('downloads', 'catalog');
+        }}
+        onSelectLounge={() => {
+          navigateToView('lounge');
         }}
         onSelectProfile={() => {
           setMobileNavTab('profile');
-          if (user) {
-            setIsStatsOpen(true);
-          } else {
-            setAuthModalState({ open: true, mode: 'login' });
-          }
+          setIsStatsOpen(true);
         }}
       />
     </div>

@@ -1,3 +1,34 @@
+export function downsampleFloat32(
+  buffer: Float32Array,
+  inputSampleRate: number,
+  targetSampleRate = 16000
+): Float32Array {
+  if (!inputSampleRate || inputSampleRate === targetSampleRate) {
+    return buffer;
+  }
+  if (inputSampleRate < targetSampleRate) {
+    return buffer;
+  }
+  const ratio = inputSampleRate / targetSampleRate;
+  const newLength = Math.max(1, Math.round(buffer.length / ratio));
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.min(buffer.length, Math.round((offsetResult + 1) * ratio));
+    let accum = 0;
+    let count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer; i++) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = count > 0 ? accum / count : buffer[Math.min(offsetBuffer, buffer.length - 1)] || 0;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
 export function float32ToPcmBase64(float32: Float32Array): string {
   const int16 = new Int16Array(float32.length);
   for (let i = 0; i < float32.length; i++) {

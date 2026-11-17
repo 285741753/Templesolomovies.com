@@ -15,19 +15,26 @@ import {
   MessageCircle,
   ExternalLink,
   Settings,
+  ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { LANGUAGES, useLanguage } from '../contexts/LanguageContext';
 import { WHATSAPP_CHANNEL_URL } from '../types/cinema';
 import { PWAInstallButton } from './PWAInstallButton';
+import { TempleLogoIcon } from './TempleLogo';
 import type { UserWatchStats } from './MyStatsModal';
 
+export type AppMainView = 'home' | 'search' | 'downloads' | 'lounge';
+
 interface HeaderProps {
+  activeView: AppMainView;
   searchQuery: string;
   searchInputRef?: RefObject<HTMLInputElement | null>;
   userStats: UserWatchStats;
+  onSelectView: (view: AppMainView, anchorId?: string) => void;
   onSearchChange: (query: string) => void;
   onOpenUpload: () => void;
+  onOpenAdminPanel?: () => void;
   onOpenAuth: (mode: 'login' | 'signup') => void;
   onOpenStats: () => void;
   onOpenSettings: () => void;
@@ -38,11 +45,14 @@ interface HeaderProps {
 }
 
 export function Header({
+  activeView,
   searchQuery,
   searchInputRef,
   userStats,
+  onSelectView,
   onSearchChange,
   onOpenUpload,
+  onOpenAdminPanel,
   onOpenAuth,
   onOpenStats,
   onOpenSettings,
@@ -114,59 +124,87 @@ export function Header({
   return (
     <header className="sticky top-0 z-40 border-b border-[#27272A] bg-[#09090B]/95 backdrop-blur-md">
       <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 sm:gap-5 px-4 py-3 sm:px-6 lg:px-8">
-        {/* Zone 1: Full HD Temple Cinema Icon & Gold Wordmark */}
-        <a
-          href="#spotlight"
-          className="flex items-center gap-2.5 text-sm sm:text-base font-bold tracking-[0.14em] uppercase text-[#E5A93B] whitespace-nowrap shrink-0 font-display focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E5A93B]"
+        {/* Zone 1: Scalable Temple Cinema SVG Icon (28px) & Gold Wordmark */}
+        <button
+          type="button"
+          onClick={() => onSelectView('home', 'spotlight')}
+          className="flex items-center gap-2.5 text-sm sm:text-base font-bold tracking-[0.14em] uppercase text-[#E6A93C] whitespace-nowrap shrink-0 font-display cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E6A93C]"
         >
-          <img
-            src="/app-icon-full.png"
-            alt="Temple Cinema icon"
-            className="h-9 w-9 rounded-lg object-cover border border-[#E5A93B]/35 shrink-0"
-          />
+          <TempleLogoIcon className="h-7 w-7 shrink-0" />
           <span>{t('templeBrand')}</span>
-        </a>
+        </button>
 
         {/* Zone 2: Single-line Nav Links */}
         <nav
           aria-label="Primary navigation"
           className="hidden xl:flex items-center gap-4 text-xs font-medium text-[#A1A1AA]"
         >
-          <a
-            href="#trending-now"
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={() => onSelectView('home', 'spotlight')}
+            className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'home' ? 'text-[#E6A93C] font-semibold' : 'hover:text-[#FAFAFA]'
+            }`}
+          >
+            {t('navHome')}
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectView('home', 'trending-now')}
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {t('navTrending')}
-          </a>
-          <a
-            href="#coming-soon"
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectView('home', 'coming-soon')}
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {t('navComingSoon')}
-          </a>
-          <a
-            href="#catalog"
-            onClick={() => onSelectCollection('all')}
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onSelectCollection('all');
+              onSelectView('search', 'catalog');
+            }}
+            className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'search' ? 'text-[#E6A93C] font-semibold' : 'hover:text-[#FAFAFA]'
+            }`}
           >
             {t('navCatalog')}
-          </a>
-          <a
-            href="#catalog"
-            onClick={() => onSelectCollection('saved')}
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onSelectCollection('saved');
+              onSelectView('search', 'catalog');
+            }}
+            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {t('navSaved')}
-          </a>
+          </button>
           {isAdmin && (
-            <a
-              href="#catalog"
-              onClick={() => onSelectCollection('uploads')}
-              className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={() => {
+                onSelectCollection('uploads');
+                onSelectView('search', 'catalog');
+              }}
+              className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {t('navUploads')}
-            </a>
+            </button>
           )}
+          <button
+            type="button"
+            onClick={() => onSelectView('lounge')}
+            className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'lounge' ? 'text-[#E6A93C] font-semibold' : 'hover:text-[#FAFAFA]'
+            }`}
+          >
+            {t('navLounge')}
+          </button>
           <button
             type="button"
             onClick={onScrollToChat}
@@ -174,30 +212,6 @@ export function Header({
           >
             {t('navChat')}
           </button>
-          <a
-            href="#chess-game"
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
-          >
-            {t('navChess')}
-          </a>
-          <a
-            href="#ai-studio"
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
-          >
-            {t('navStudio')}
-          </a>
-          <a
-            href="#stage-3d"
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
-          >
-            {t('navStage3d')}
-          </a>
-          <a
-            href="#cinema-map"
-            className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0"
-          >
-            {t('navMap')}
-          </a>
           <button
             type="button"
             onClick={onOpenWatchParty}
@@ -392,6 +406,20 @@ export function Header({
 
                   {isAdmin && (
                     <>
+                      {onOpenAdminPanel && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMenuOpen(false);
+                            onOpenAdminPanel();
+                          }}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-[#E5A93B] hover:bg-[#18181B] cursor-pointer"
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5 text-[#E5A93B]" aria-hidden="true" />
+                          <span>Admin</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => {

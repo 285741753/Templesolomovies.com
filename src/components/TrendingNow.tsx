@@ -41,24 +41,16 @@ export function TrendingNow({ movies, onDownload, onSelectMovie }: TrendingNowPr
   const topFive = useMemo(() => {
     const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
     const now = Date.now();
-
-    const thisWeek = movies
-      .filter((m) => {
-        const created = new Date(m.createdAt).getTime();
-        return Number.isFinite(created) && now - created <= sevenDaysMs;
+    return [...movies]
+      .sort((a, b) => {
+        const aRecentCustom =
+          !a.isSeeded && now - (new Date(a.createdAt).getTime() || 0) < sevenDaysMs ? 1 : 0;
+        const bRecentCustom =
+          !b.isSeeded && now - (new Date(b.createdAt).getTime() || 0) < sevenDaysMs ? 1 : 0;
+        if (aRecentCustom !== bRecentCustom) return bRecentCustom - aRecentCustom;
+        return b.downloads - a.downloads;
       })
-      .sort((a, b) => b.downloads - a.downloads);
-
-    if (thisWeek.length >= 5) {
-      return thisWeek.slice(0, 5);
-    }
-
-    const thisWeekIds = new Set(thisWeek.map((m) => m.id));
-    const remaining = movies
-      .filter((m) => !thisWeekIds.has(m.id))
-      .sort((a, b) => b.downloads - a.downloads);
-
-    return [...thisWeek, ...remaining].slice(0, 5);
+      .slice(0, 5);
   }, [movies]);
 
   if (topFive.length === 0) return null;

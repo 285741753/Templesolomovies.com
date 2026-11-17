@@ -16,7 +16,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { float32ToPcmBase64, pcmBase64ToFloat32 } from '../utils/liveAudio';
+import { downsampleFloat32, float32ToPcmBase64, pcmBase64ToFloat32 } from '../utils/liveAudio';
 
 type StudioTab = 'chat' | 'voice' | 'transcribe';
 
@@ -127,6 +127,8 @@ export function CinemaAIStudio() {
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const nextPlayTimeRef = useRef<number>(0);
   const activeAudioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const isLiveReadyRef = useRef(false);
+  const hadVoiceErrorRef = useRef(false);
 
   const clearPlaybackQueue = useCallback(() => {
     for (const src of activeAudioSourcesRef.current) {
@@ -145,42 +147,46 @@ export function CinemaAIStudio() {
     }
   }, []);
 
-  const stopVoiceSession = useCallback(() => {
-    clearPlaybackQueue();
-    if (processorRef.current) {
-      processorRef.current.onaudioprocess = null;
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (sourceNodeRef.current) {
-      sourceNodeRef.current.disconnect();
-      sourceNodeRef.current = null;
-    }
-    if (micStreamRef.current) {
-      for (const track of micStreamRef.current.getTracks()) {
-        track.stop();
+  const stopVoiceSession = useCallback(
+    (preserveError = false) => {
+      isLiveReadyRef.current = false;
+      clearPlaybackQueue();
+      if (processorRef.current) {
+        processorRef.current.onaudioprocess = null;
+        processorRef.current.disconnect();
+        processorRef.current = null;
       }
-      micStreamRef.current = null;
-    }
-    if (inputCtxRef.current) {
-      void inputCtxRef.current.close();
-      inputCtxRef.current = null;
-    }
-    if (outputCtxRef.current) {
-      void outputCtxRef.current.close();
-      outputCtxRef.current = null;
-    }
-    if (liveWsRef.current) {
-      if (
-        liveWsRef.current.readyState === WebSocket.OPEN ||
-        liveWsRef.current.readyState === WebSocket.CONNECTING
-      ) {
-        liveWsRef.current.close();
+      if (sourceNodeRef.current) {
+        sourceNodeRef.current.disconnect();
+        sourceNodeRef.current = null;
       }
-      liveWsRef.current = null;
-    }
-    setVoiceStatus('idle');
-  }, [clearPlaybackQueue]);
+      if (micStreamRef.current) {
+        for (const track of micStreamRef.current.getTracks()) {
+          track.stop();
+        }
+        micStreamRef.current = null;
+      }
+      if (inputCtxRef.current) {
+        void inputCtxRef.current.close().catch(() => {});
+        inputCtxRef.current = null;
+      }
+      if (outputCtxRef.current) {
+        void outputCtxRef.current.close().catch(() => {});
+        outputCtxRef.current = null;
+      }
+      if (liveWsRef.current) {
+        const ws = liveWsRef.current;
+        liveWsRef.current = null;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+      }
+      if (!preserveError) {
+        setVoiceStatus('idle');
+      }
+    },
+    [clearPlaybackQueue]
+  );
 
   useEffect(() => {
     return () => {
@@ -235,13 +241,31 @@ export function CinemaAIStudio() {
     if (voiceStatus === 'connecting' || voiceStatus === 'live') return;
     setVoiceError(null);
     setVoiceStatus('connecting');
+    hadVoiceErrorRef.current = false;
+    isLiveReadyRef.current = false;
 
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Microphone access is not available in this browser.');
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
 
-      const inputCtx = new AudioContext({ sampleRate: 16000 });
-      const outputCtx = new AudioContext({ sampleRate: 24000 });
+      let inputCtx: AudioContext;
+      try {
+        inputCtx = new AudioContext({ sampleRate: 16000 });
+      } catch {
+        inputCtx = new AudioContext();
+      }
+      let outputCtx: AudioContext;
+      try {
+        outputCtx = new AudioContext({ sampleRate: 24000 });
+      } catch {
+        outputCtx = new AudioContext();
+      }
+      await inputCtx.resume().catch(() => {});
+      await outputCtx.resume().catch(() => {});
+
       inputCtxRef.current = inputCtx;
       outputCtxRef.current = outputCtx;
       nextPlayTimeRef.current = outputCtx.currentTime;
@@ -259,8 +283,13 @@ export function CinemaAIStudio() {
         processorRef.current = processor;
 
         processor.onaudioprocess = (e) => {
-          if (liveWsRef.current?.readyState !== WebSocket.OPEN) return;
-          const pcmBase64 = float32ToPcmBase64(e.inputBuffer.getChannelData(0));
+          if (liveWsRef.current?.readyState !== WebSocket.OPEN || !isLiveReadyRef.current) return;
+          const resampled = downsampleFloat32(
+            e.inputBuffer.getChannelData(0),
+            inputCtx.sampleRate,
+            16000
+          );
+          const pcmBase64 = float32ToPcmBase64(resampled);
           liveWsRef.current.send(JSON.stringify({ audio: pcmBase64 }));
         };
 
@@ -277,6 +306,7 @@ export function CinemaAIStudio() {
             message?: string;
           };
           if (msg.type === 'ready') {
+            isLiveReadyRef.current = true;
             setVoiceStatus('live');
           } else if (msg.type === 'audio' && msg.data) {
             play24kPcmChunk(msg.data);
@@ -287,11 +317,12 @@ export function CinemaAIStudio() {
           } else if (msg.type === 'interrupted') {
             clearPlaybackQueue();
           } else if (msg.type === 'error') {
+            hadVoiceErrorRef.current = true;
             setVoiceError(msg.message || 'Voice conversation error.');
             setVoiceStatus('error');
-            stopVoiceSession();
+            stopVoiceSession(true);
           } else if (msg.type === 'closed') {
-            stopVoiceSession();
+            stopVoiceSession(hadVoiceErrorRef.current);
           }
         } catch {
           // Ignore malformed WS message
@@ -299,24 +330,26 @@ export function CinemaAIStudio() {
       };
 
       ws.onerror = () => {
+        hadVoiceErrorRef.current = true;
         setVoiceError('Could not connect to the live voice server.');
         setVoiceStatus('error');
-        stopVoiceSession();
+        stopVoiceSession(true);
       };
 
       ws.onclose = () => {
         if (liveWsRef.current === ws) {
-          stopVoiceSession();
+          stopVoiceSession(hadVoiceErrorRef.current);
         }
       };
     } catch (err) {
+      hadVoiceErrorRef.current = true;
       setVoiceError(
         err instanceof Error
           ? err.message
           : 'Microphone access is required for voice conversation.'
       );
       setVoiceStatus('error');
-      stopVoiceSession();
+      stopVoiceSession(true);
     }
   };
 
@@ -547,9 +580,12 @@ export function CinemaAIStudio() {
             </div>
 
             {chatError && (
-              <p role="alert" className="text-xs text-red-400">
+              <div
+                role="alert"
+                className="rounded-lg border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-200"
+              >
                 {chatError}
-              </p>
+              </div>
             )}
 
             <form
@@ -624,7 +660,7 @@ export function CinemaAIStudio() {
                 {voiceStatus === 'live' || voiceStatus === 'connecting' ? (
                   <button
                     type="button"
-                    onClick={stopVoiceSession}
+                    onClick={() => stopVoiceSession(false)}
                     className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500 whitespace-nowrap cursor-pointer"
                   >
                     <MicOff className="h-3.5 w-3.5" aria-hidden="true" />
@@ -644,9 +680,12 @@ export function CinemaAIStudio() {
             </div>
 
             {voiceError && (
-              <p role="alert" className="text-xs text-red-400">
+              <div
+                role="alert"
+                className="rounded-lg border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-200"
+              >
                 {voiceError}
-              </p>
+              </div>
             )}
 
             <div className="h-64 overflow-y-auto rounded-xl border border-[#27272A] bg-[#09090B] p-4 space-y-3">
@@ -767,9 +806,12 @@ export function CinemaAIStudio() {
                 )}
 
                 {transcribeError && (
-                  <p role="alert" className="text-xs text-red-400">
+                  <div
+                    role="alert"
+                    className="rounded-lg border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-200"
+                  >
                     {transcribeError}
-                  </p>
+                  </div>
                 )}
               </div>
             </div>

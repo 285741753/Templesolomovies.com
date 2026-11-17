@@ -37,6 +37,8 @@ interface MovieGridProps {
   onChangeCollectionView: (view: CollectionFilter) => void;
   onDownload: (movie: Movie) => void;
   onSelectMovie: (movie: Movie) => void;
+  onPlayTrailer?: (movie: Movie) => void;
+  onOpenRequestMovie?: () => void;
   onShareToChat: (movie: Movie) => void;
   onToggleSave: (movie: Movie) => void;
   onOpenUpload: () => void;
@@ -47,6 +49,7 @@ const GENRES: Array<'All' | MovieGenre> = [
   'Action',
   'Nollywood',
   'Sci-Fi',
+  'Music',
   'Drama',
   'Thriller',
   'Mystery',
@@ -103,6 +106,8 @@ export function MovieGrid({
   onChangeCollectionView,
   onDownload,
   onSelectMovie,
+  onPlayTrailer,
+  onOpenRequestMovie,
   onShareToChat,
   onToggleSave,
   onOpenUpload,
@@ -113,6 +118,7 @@ export function MovieGrid({
 
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [selectedDirector, setSelectedDirector] = useState<string>('All');
+  const [selectedCountry, setSelectedCountry] = useState<string>('All');
   const [yearFrom, setYearFrom] = useState<string>('');
   const [yearTo, setYearTo] = useState<string>('');
   const [imdbMin, setImdbMin] = useState<string>('');
@@ -137,6 +143,15 @@ export function MovieGrid({
       if (name) {
         counts.set(name, (counts.get(name) || 0) + 1);
       }
+    }
+    return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [movies]);
+
+  const availableCountries = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of movies) {
+      const country = m.country?.trim() || 'International';
+      counts.set(country, (counts.get(country) || 0) + 1);
     }
     return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [movies]);
@@ -171,6 +186,7 @@ export function MovieGrid({
 
   const activeAdvancedCount =
     (selectedDirector !== 'All' ? 1 : 0) +
+    (selectedCountry !== 'All' ? 1 : 0) +
     (yearFrom !== '' || yearTo !== '' ? 1 : 0) +
     (imdbMin !== '' || imdbMax !== '' ? 1 : 0);
 
@@ -181,6 +197,7 @@ export function MovieGrid({
 
   const resetAdvancedFilters = () => {
     setSelectedDirector('All');
+    setSelectedCountry('All');
     setYearFrom('');
     setYearTo('');
     setImdbMin('');
@@ -202,6 +219,9 @@ export function MovieGrid({
     if (selectedDirector !== 'All' && m.director.trim() !== selectedDirector) {
       return false;
     }
+    if (selectedCountry !== 'All' && (m.country?.trim() || 'International') !== selectedCountry) {
+      return false;
+    }
     if (yearFrom !== '' && m.year < Number(yearFrom)) {
       return false;
     }
@@ -220,7 +240,9 @@ export function MovieGrid({
     return (
       m.title.toLowerCase().includes(q) ||
       m.director.toLowerCase().includes(q) ||
-      m.genre.toLowerCase().includes(q)
+      m.genre.toLowerCase().includes(q) ||
+      (m.category || '').toLowerCase().includes(q) ||
+      (m.country || '').toLowerCase().includes(q)
     );
   });
 
@@ -228,12 +250,18 @@ export function MovieGrid({
     acc[genre] =
       genre === 'All'
         ? scopedMovies.length
+        : genre === 'Music'
+        ? scopedMovies.filter((m) => m.genre === 'Music' || m.category === 'Music').length
         : scopedMovies.filter((m) => m.genre === genre).length;
     return acc;
   }, {});
 
   const filtered = scopedMovies
-    .filter((m) => selectedGenre === 'All' || m.genre === selectedGenre)
+    .filter((m) => {
+      if (selectedGenre === 'All') return true;
+      if (selectedGenre === 'Music') return m.genre === 'Music' || m.category === 'Music';
+      return m.genre === selectedGenre;
+    })
     .sort((a, b) => {
       if (sortBy === 'imdb') return (b.imdbRating ?? 7.8) - (a.imdbRating ?? 7.8);
       if (sortBy === 'downloads') return b.downloads - a.downloads;
@@ -302,13 +330,13 @@ export function MovieGrid({
           </div>
         </div>
 
-        {/* Advanced Filtering Controls: Release Year Range, Director, IMDb Rating Range */}
+        {/* Advanced Filtering Controls: Release Year Range, Director, Country, IMDb Rating Range */}
         {filtersOpen && (
           <div
             id="catalog-advanced-filters"
             className="rounded-xl border border-[#27272A] bg-[#111114] p-4"
           >
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* Release Year Range */}
               <div>
                 <span className="block text-[11px] font-mono uppercase tracking-wider text-[#A1A1AA] mb-1.5">
@@ -363,6 +391,29 @@ export function MovieGrid({
                   {availableDirectors.map(([director, count]) => (
                     <option key={director} value={director}>
                       {director} ({count})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Country Filter */}
+              <div>
+                <label
+                  htmlFor="catalog-country-filter"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-[#A1A1AA] mb-1.5"
+                >
+                  Country
+                </label>
+                <select
+                  id="catalog-country-filter"
+                  value={selectedCountry}
+                  onChange={(e) => setSelectedCountry(e.target.value)}
+                  className="w-full rounded-lg border border-[#27272A] bg-[#09090B] px-3 py-2 text-xs text-[#FAFAFA] focus:border-[#E5A93B] focus:outline-none cursor-pointer"
+                >
+                  <option value="All">All Countries</option>
+                  {availableCountries.map(([country, count]) => (
+                    <option key={country} value={country}>
+                      {country} ({count})
                     </option>
                   ))}
                 </select>
@@ -447,16 +498,29 @@ export function MovieGrid({
             })}
           </div>
 
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={onOpenUpload}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#18181B] px-3.5 py-2 text-xs font-semibold text-[#FAFAFA] hover:border-[#E5A93B] transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Upload className="h-3.5 w-3.5 text-[#E5A93B]" aria-hidden="true" />
-              <span>{t('uploadNewMovie')}</span>
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {onOpenRequestMovie && (
+              <button
+                type="button"
+                onClick={onOpenRequestMovie}
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-lg border border-[#E6A93C]/50 bg-[#E6A93C]/10 px-3.5 py-2 text-xs font-semibold text-[#E6A93C] hover:bg-[#E6A93C]/20 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Film className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Request a Movie</span>
+              </button>
+            )}
+
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={onOpenUpload}
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#18181B] px-3.5 py-2 text-xs font-semibold text-[#FAFAFA] hover:border-[#E5A93B] transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Upload className="h-3.5 w-3.5 text-[#E5A93B]" aria-hidden="true" />
+                <span>{t('uploadNewMovie')}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="border-b border-[#27272A]">
@@ -501,6 +565,7 @@ export function MovieGrid({
               {t('showingLabel')} {filtered.length}{' '}
               {filtered.length === 1 ? t('movieSingular') : t('moviePlural')}
               {selectedGenre !== 'All' ? ` ${t('inCategory')} ${selectedGenre}` : ''}
+              {selectedCountry !== 'All' ? ` · ${selectedCountry}` : ''}
               {selectedDirector !== 'All' ? ` · ${t('filterDirector')}: ${selectedDirector}` : ''}
               {(yearFrom || yearTo)
                 ? ` · ${yearFrom || availableYears[0] || ''}–${yearTo || availableYears[availableYears.length - 1] || ''}`
@@ -665,6 +730,12 @@ export function MovieGrid({
                   <div>
                     <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#A1A1AA] mb-1.5">
                       <span>{movie.genre}</span>
+                      {movie.country && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{movie.country}</span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span className="font-mono tabular-nums">{movie.year}</span>
                       <span aria-hidden="true">·</span>
@@ -734,6 +805,17 @@ export function MovieGrid({
                       >
                         {t('watch')}
                       </button>
+
+                      {onPlayTrailer && (
+                        <button
+                          type="button"
+                          onClick={() => onPlayTrailer(movie)}
+                          title="Watch trailer preview"
+                          className="inline-flex items-center justify-center rounded-lg border border-[#27272A] bg-[#18181B] px-2.5 py-2 text-xs font-medium text-[#E6A93C] hover:border-[#E6A93C] transition-colors whitespace-nowrap cursor-pointer"
+                        >
+                          Trailer
+                        </button>
+                      )}
 
                       <button
                         type="button"

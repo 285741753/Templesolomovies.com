@@ -5,6 +5,7 @@ export type MovieGenre =
   | 'Action'
   | 'Nollywood'
   | 'Sci-Fi'
+  | 'Music'
   | 'Thriller'
   | 'Drama'
   | 'Mystery'
@@ -13,12 +14,33 @@ export type MovieGenre =
   | 'Animation'
   | 'Horror';
 
+export type HomeCategoryChip =
+  | 'All'
+  | 'Movies'
+  | 'Series'
+  | 'Music'
+  | 'Anime'
+  | 'Nollywood'
+  | 'K-Drama';
+
 export type MovieQuality = '4K UHD' | '1080p HD' | '720p HD';
+
+export interface SeriesEpisode {
+  id: string;
+  season: number;
+  episode: number;
+  title: string;
+  duration: string;
+  videoUrl: string;
+  synopsis?: string;
+}
 
 export interface Movie {
   id: string;
   title: string;
   genre: MovieGenre;
+  category?: Exclude<HomeCategoryChip, 'All'>;
+  country?: string;
   year: number;
   duration: string;
   quality: MovieQuality;
@@ -28,6 +50,7 @@ export interface Movie {
   imdbRating?: number;
   posterUrl: string;
   backdropUrl?: string;
+  trailerUrl?: string;
   videoUrl: string;
   fileName: string;
   fileSizeBytes: number;
@@ -37,6 +60,14 @@ export interface Movie {
   isSeeded?: boolean;
   ownerUid?: string;
   createdAt: string;
+  ageRating?: string;
+  cloudinaryPublicId?: string;
+  posterPublicId?: string;
+  videoPublicId?: string;
+  cloudinaryUploaded?: boolean;
+  episodes?: SeriesEpisode[];
+  audioLanguages?: string[];
+  subtitleLanguages?: string[];
 }
 
 export interface UpcomingMovie {
@@ -76,6 +107,47 @@ export interface WatchProgressEntry {
 
 export type VideoQualitySetting = 'auto' | '360p' | '480p' | '720p' | '1080p';
 export type DownloadQualitySetting = '360p' | '480p' | '720p' | '1080p';
+export type DownloadQualityTier = '360p' | '720p' | '1080p' | '4K';
+
+export interface DownloadTask {
+  id: string;
+  movieId: string;
+  title: string;
+  posterUrl: string;
+  fileName: string;
+  quality: DownloadQualityTier;
+  status: 'downloading' | 'paused' | 'completed' | 'error';
+  receivedBytes: number;
+  totalBytes: number;
+  speedBps: number;
+  errorMessage?: string;
+  sourceUrl?: string;
+  offlineAvailable: boolean;
+  updatedAt: number;
+}
+
+export interface MovieRequestItem {
+  id: string;
+  title: string;
+  year?: number;
+  country?: string;
+  notes?: string;
+  requestedBy: string;
+  upvotes: number;
+  status: 'pending' | 'added';
+  createdAt: string;
+}
+
+export interface BrokenLinkReport {
+  id: string;
+  movieId: string;
+  movieTitle: string;
+  reason: string;
+  details?: string;
+  reportedBy: string;
+  status: 'open' | 'resolved';
+  createdAt: string;
+}
 
 export interface AppSettings {
   videoQuality: VideoQualitySetting;
