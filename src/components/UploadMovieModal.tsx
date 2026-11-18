@@ -9,6 +9,14 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { usePWAInstall } from '../hooks/usePWAInstall';
+import {
+  compressPosterIfNeeded,
+  getCloudinaryConfig,
+  resolveApiUrl,
+  saveLocalCloudinaryConfig,
+  uploadToCloudinaryUnsigned,
+} from '../services/cloudinary';
 import type { Movie, MovieGenre, MovieQuality } from '../types/cinema';
 import { formatDurationSeconds, formatFileSize } from '../utils/format';
 
@@ -36,17 +44,36 @@ const GENRES: MovieGenre[] = [
 const QUALITIES: MovieQuality[] = ['4K UHD', '1080p HD', '720p HD'];
 
 const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
-const CHUNK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB chunks stay safely below Cloud Run 32 MB limit
-const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov)$/i;
+const DEFAULT_CHUNK_SIZE_BYTES = 2 * 1024 * 1024; // 2 MB default chunks
+const FALLBACK_CHUNK_SIZE_BYTES = 768 * 1024; // 768 KB fallback if reverse proxy enforces 1 MB cap
+const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov|m4v)$/i;
 const ALLOWED_VIDEO_MIMES = new Set([
   'video/mp4',
   'video/webm',
   'video/x-matroska',
   'video/matroska',
   'video/quicktime',
+  'video/3gpp',
+  'video/x-m4v',
 ]);
 const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp)$/i;
 const ALLOWED_POSTER_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+
+class StaticHostUploadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StaticHostUploadError';
+  }
+}
+
+class UploadHttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'UploadHttpError';
+    this.status = status;
+  }
+}
 
 function validateSelectedVideoFile(file: File): string | null {
   const mime = (file.type || '').toLowerCase();
@@ -54,9 +81,9 @@ function validateSelectedVideoFile(file: File): string | null {
     return 'Please choose a video file (images are not allowed here).';
   }
   const hasValidExt = ALLOWED_VIDEO_EXTS.test(file.name || '');
-  const hasValidMime = ALLOWED_VIDEO_MIMES.has(mime);
+  const hasValidMime = mime.startsWith('video/') || ALLOWED_VIDEO_MIMES.has(mime);
   if (!hasValidExt && !hasValidMime) {
-    return 'Please choose a video file (MP4, WEBM, MKV, or MOV).';
+    return 'Please choose a video file (MP4, WEBM, MKV, MOV, or M4V).';
   }
   if (file.size <= 0) {
     return 'The selected video file is empty.';
@@ -82,16 +109,16 @@ function validateSelectedPosterFile(file: File): string | null {
 
 function mapHttpStatusFallback(status: number, rawText: string): string {
   if (status === 413) {
-    return 'File is too large for this request (413 Payload Too Large). Try a smaller file.';
+    return 'File chunk exceeded proxy body size limit (HTTP 413 Payload Too Large).';
   }
   if (status === 401) {
-    return 'Administrator sign-in expired. Please log in again and retry.';
+    return 'Administrator sign-in expired (HTTP 401). Please log in again and retry.';
   }
   if (status === 403) {
-    return 'Only the administrator account can upload movies.';
+    return 'Access denied (HTTP 403): Only the administrator account can upload movies.';
   }
   if (status === 404) {
-    return 'Upload endpoint or session not found (404). Please retry.';
+    return 'Upload endpoint or session not found (HTTP 404). Please retry.';
   }
   if (status >= 502 && status <= 504) {
     return `Server gateway timeout or temporary unavailability (HTTP ${status}). Please try again.`;
@@ -100,6 +127,17 @@ function mapHttpStatusFallback(status: number, rawText: string): string {
   return cleanSnippet
     ? `Upload failed (HTTP ${status}): ${cleanSnippet}`
     : `Upload failed with server status HTTP ${status}.`;
+}
+
+function isSpaHtmlFallback(status: number, contentType: string, rawText: string): boolean {
+  if (!contentType.includes('text/html')) {
+    return status === 404 || status === 405;
+  }
+  // Never misclassify proxy 413/5xx HTML error pages as a static host
+  if (status === 413 || status >= 500) {
+    return false;
+  }
+  return status === 200 || status === 404 || status === 405 || rawText.includes('<div id="root">');
 }
 
 async function parseJsonResponse<T>(res: Response): Promise<T> {
@@ -111,15 +149,22 @@ async function parseJsonResponse<T>(res: Response): Promise<T> {
     try {
       parsed = JSON.parse(rawText || '{}') as T & { error?: string };
     } catch {
-      throw new Error(`Upload server returned malformed JSON (HTTP ${res.status}).`);
+      throw new UploadHttpError(res.status, `Upload server returned malformed JSON (HTTP ${res.status}).`);
     }
     if (!res.ok) {
-      throw new Error(parsed?.error || mapHttpStatusFallback(res.status, rawText));
+      throw new UploadHttpError(res.status, parsed?.error || mapHttpStatusFallback(res.status, rawText));
     }
     return parsed as T;
   }
 
-  throw new Error(
+  if (isSpaHtmlFallback(res.status, contentType, rawText)) {
+    throw new StaticHostUploadError(
+      'Static hosting detected (no Node upload server at /api/movies).'
+    );
+  }
+
+  throw new UploadHttpError(
+    res.status || 500,
     res.ok
       ? `Upload server returned non-JSON response (${contentType || 'unknown content type'}).`
       : mapHttpStatusFallback(res.status, rawText)
@@ -143,11 +188,11 @@ function sendXhrFormData<T>(params: {
       signal.removeEventListener('abort', onAbort);
     };
 
-    const fail = (message: string) => {
+    const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error(message));
+      reject(err);
     };
 
     const onAbort = () => {
@@ -156,16 +201,17 @@ function sendXhrFormData<T>(params: {
       } catch {
         // Ignore abort errors
       }
-      fail('Upload cancelled.');
+      fail(new Error('Upload cancelled.'));
     };
 
     if (signal.aborted) {
-      fail('Upload cancelled.');
+      fail(new Error('Upload cancelled.'));
       return;
     }
     signal.addEventListener('abort', onAbort, { once: true });
 
     xhr.open('POST', url, true);
+    xhr.timeout = 120_000;
     if (token) {
       xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     }
@@ -185,8 +231,17 @@ function sendXhrFormData<T>(params: {
       const rawText = xhr.responseText || '';
 
       if (!contentType.includes('application/json')) {
+        if (isSpaHtmlFallback(xhr.status, contentType, rawText)) {
+          reject(
+            new StaticHostUploadError(
+              'Static hosting detected (no Node upload server at /api/movies).'
+            )
+          );
+          return;
+        }
         reject(
-          new Error(
+          new UploadHttpError(
+            xhr.status || 500,
             xhr.status >= 200 && xhr.status < 300
               ? `Upload server returned non-JSON response (${contentType || 'text/html'}).`
               : mapHttpStatusFallback(xhr.status, rawText)
@@ -199,23 +254,27 @@ function sendXhrFormData<T>(params: {
       try {
         parsed = JSON.parse(rawText || '{}') as T & { error?: string };
       } catch {
-        reject(new Error(`Upload server returned unreadable JSON (HTTP ${xhr.status}).`));
+        reject(new UploadHttpError(xhr.status, `Upload server returned unreadable JSON (HTTP ${xhr.status}).`));
         return;
       }
 
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(parsed as T);
       } else {
-        reject(new Error(parsed?.error || mapHttpStatusFallback(xhr.status, rawText)));
+        reject(new UploadHttpError(xhr.status, parsed?.error || mapHttpStatusFallback(xhr.status, rawText)));
       }
     };
 
     xhr.onerror = () => {
-      fail('Network connection dropped while uploading. Check your internet connection and retry.');
+      fail(new Error('Network connection dropped while uploading. Check your internet connection and retry.'));
+    };
+
+    xhr.ontimeout = () => {
+      fail(new Error('Upload request timed out (120s). Check your connection and try again.'));
     };
 
     xhr.onabort = () => {
-      fail('Upload cancelled.');
+      fail(new Error('Upload cancelled.'));
     };
 
     xhr.send(formData);
@@ -252,6 +311,9 @@ export function UploadMovieModal({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatusText, setUploadStatusText] = useState('');
   const [error, setError] = useState('');
+  const [needsCloudSetup, setNeedsCloudSetup] = useState(false);
+  const [cloudNameInput, setCloudNameInput] = useState(() => getCloudinaryConfig().cloudName);
+  const [cloudPresetInput, setCloudPresetInput] = useState(() => getCloudinaryConfig().uploadPreset);
 
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const posterInputRef = useRef<HTMLInputElement | null>(null);
@@ -274,8 +336,11 @@ export function UploadMovieModal({
     return () => window.removeEventListener('keydown', handleKey);
   }, [isOpen, isUploading, onClose]);
 
+  const { setBusyActivity } = usePWAInstall();
+
   // Keep the browser tab alive and warn before closing mid-upload
   useEffect(() => {
+    setBusyActivity('upload', isUploading);
     if (!isUploading) return;
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
@@ -283,8 +348,11 @@ export function UploadMovieModal({
       return e.returnValue;
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isUploading]);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      setBusyActivity('upload', false);
+    };
+  }, [isUploading, setBusyActivity]);
 
   if (!isOpen) return null;
 
@@ -412,6 +480,95 @@ export function UploadMovieModal({
     formData.append('synopsis', synopsis.trim());
   };
 
+  const uploadViaCloudinaryFallback = async (
+    signal: AbortSignal,
+    fileToUpload: File
+  ): Promise<Movie> => {
+    const cleanTitle = title.trim();
+    const parsedYear = Math.min(2035, Math.max(1900, Number(year) || new Date().getFullYear()));
+    const cleanDuration = duration.trim() || '1h 45m';
+    const cleanDirector = director.trim() || 'Independent';
+    const cleanUploader = uploader.trim() || defaultUploader || 'TempleSolo';
+
+    let posterUrl = '/storage/posters/midnight_meridian_poster.jpg';
+    let posterPublicId: string | undefined;
+
+    if (posterFile) {
+      setUploadStatusText('Uploading poster to Cloudinary...');
+      const pRes = await uploadToCloudinaryUnsigned(posterFile, {
+        folder: 'temple-cinema/posters',
+        signal,
+        onProgress: (pct) => setUploadProgress(Math.min(10, Math.round(pct * 0.1))),
+      });
+      posterUrl = pRes.secure_url;
+      posterPublicId = pRes.public_id;
+    }
+
+    setUploadStatusText('Uploading movie directly to Cloudinary...');
+    const vRes = await uploadToCloudinaryUnsigned(fileToUpload, {
+      folder: 'temple-cinema/videos',
+      signal,
+      onProgress: (pct) => {
+        const base = posterFile ? 10 : 0;
+        const span = posterFile ? 90 : 100;
+        setUploadProgress(Math.min(99, Math.round(base + (pct / 100) * span)));
+      },
+    });
+
+    const finalDuration =
+      duration.trim() ||
+      (vRes.duration && Number.isFinite(vRes.duration)
+        ? formatDurationSeconds(vRes.duration)
+        : cleanDuration);
+
+    return {
+      id: `movie-cld-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      title: cleanTitle,
+      genre,
+      category,
+      country: country.trim() || undefined,
+      year: parsedYear,
+      duration: finalDuration,
+      quality,
+      director: cleanDirector,
+      uploader: cleanUploader,
+      synopsis:
+        synopsis.trim() ||
+        `${cleanTitle} (${parsedYear}) — uploaded to Temple Cinema vault.`,
+      imdbRating: Number.isFinite(Number(imdbRating))
+        ? Math.round(Math.min(10, Math.max(1, Number(imdbRating))) * 10) / 10
+        : 7.8,
+      ageRating: '16+',
+      posterUrl,
+      backdropUrl: posterUrl,
+      ...(trailerUrl.trim() ? { trailerUrl: trailerUrl.trim() } : {}),
+      videoUrl: vRes.secure_url,
+      fileName: fileToUpload.name || `${cleanTitle}.mp4`,
+      fileSizeBytes: vRes.bytes || fileToUpload.size,
+      mimeType: fileToUpload.type || 'video/mp4',
+      downloads: 0,
+      featured: false,
+      isSeeded: false,
+      cloudinaryPublicId: vRes.public_id,
+      posterPublicId,
+      videoPublicId: vRes.public_id,
+      cloudinaryUploaded: true,
+      createdAt: new Date().toISOString(),
+    };
+  };
+
+  const handleSaveCloudSetup = () => {
+    const cleanCloud = cloudNameInput.trim();
+    const cleanPreset = cloudPresetInput.trim();
+    if (!cleanCloud || !cleanPreset) {
+      setError('Enter both your public Cloudinary Cloud Name and Unsigned Upload Preset.');
+      return;
+    }
+    saveLocalCloudinaryConfig(cleanCloud, cleanPreset);
+    setNeedsCloudSetup(false);
+    setError('');
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!videoFile) {
@@ -462,136 +619,218 @@ export function UploadMovieModal({
     let createdUploadId: string | null = null;
 
     try {
-      // Small videos <= 4 MB use single direct request; larger videos use 4 MB chunked transfer
-      if (videoFile.size <= CHUNK_SIZE_BYTES) {
-        setUploadStatusText('Uploading movie file...');
-        const formData = new FormData();
-        formData.append('video', videoFile);
-        if (posterFile) {
-          formData.append('poster', posterFile);
-        }
-        appendMetadataFields(formData);
+      const preparedPoster = posterFile ? await compressPosterIfNeeded(posterFile, 750 * 1024) : null;
 
-        const parsed = await sendXhrFormData<{ movie: Movie }>({
-          url: '/api/movies',
-          formData,
-          token,
-          signal: controller.signal,
-          onProgress: (loaded, total) => {
-            if (total > 0) {
-              setUploadProgress(Math.min(99, Math.round((loaded / total) * 100)));
-            }
+      const runChunkedUpload = async (chunkSizeBytes: number): Promise<Movie> => {
+        const totalChunks = Math.ceil(videoFile.size / chunkSizeBytes);
+        const initRes = await fetch(resolveApiUrl('/api/movies/chunked/init'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
           },
+          signal: controller.signal,
+          body: JSON.stringify({
+            fileName: videoFile.name,
+            mimeType: videoFile.type || 'video/mp4',
+            fileSizeBytes: videoFile.size,
+            totalChunks,
+          }),
         });
-        setUploadProgress(100);
-        onUploaded(parsed.movie);
-        resetForm();
-        onClose();
-        return;
-      }
+        const initData = await parseJsonResponse<{ uploadId: string }>(initRes);
+        createdUploadId = initData.uploadId;
 
-      // Chunked upload for files > 4 MB (handles up to 2 GB cleanly through reverse proxies)
-      const totalChunks = Math.ceil(videoFile.size / CHUNK_SIZE_BYTES);
-      const initRes = await fetch('/api/movies/chunked/init', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          fileName: videoFile.name,
-          mimeType: videoFile.type || 'video/mp4',
-          fileSizeBytes: videoFile.size,
-          totalChunks,
-        }),
-      });
-      const initData = await parseJsonResponse<{ uploadId: string }>(initRes);
-      createdUploadId = initData.uploadId;
+        for (let i = 0; i < totalChunks; i += 1) {
+          if (controller.signal.aborted) {
+            throw new Error('Upload cancelled.');
+          }
 
-      for (let i = 0; i < totalChunks; i += 1) {
-        if (controller.signal.aborted) {
-          throw new Error('Upload cancelled.');
-        }
+          const start = i * chunkSizeBytes;
+          const end = Math.min(videoFile.size, start + chunkSizeBytes);
+          const chunkBlob = videoFile.slice(start, end);
 
-        const start = i * CHUNK_SIZE_BYTES;
-        const end = Math.min(videoFile.size, start + CHUNK_SIZE_BYTES);
-        const chunkBlob = videoFile.slice(start, end);
+          let chunkSuccess = false;
+          let lastChunkError: Error | null = null;
 
-        let chunkSuccess = false;
-        let lastChunkError: Error | null = null;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+              setUploadStatusText(
+                attempt > 1
+                  ? `Retrying part ${i + 1} of ${totalChunks} (attempt ${attempt})...`
+                  : `Uploading part ${i + 1} of ${totalChunks}...`
+              );
 
-        for (let attempt = 1; attempt <= 3; attempt += 1) {
-          try {
-            setUploadStatusText(
-              attempt > 1
-                ? `Retrying part ${i + 1} of ${totalChunks} (attempt ${attempt})...`
-                : `Uploading part ${i + 1} of ${totalChunks}...`
-            );
+              const chunkForm = new FormData();
+              chunkForm.append('chunkIndex', String(i));
+              chunkForm.append('chunk', chunkBlob, `${videoFile.name}.part${i}`);
 
-            const chunkForm = new FormData();
-            chunkForm.append('chunkIndex', String(i));
-            chunkForm.append('chunk', chunkBlob, `${videoFile.name}.part${i}`);
-
-            const freshToken = (await getIdToken()) || token;
-            await sendXhrFormData<{ received: boolean }>({
-              url: `/api/movies/chunked/${encodeURIComponent(createdUploadId)}/part?chunkIndex=${i}`,
-              formData: chunkForm,
-              token: freshToken,
-              signal: controller.signal,
-              onProgress: (loaded, total) => {
-                const chunkFraction = total > 0 ? loaded / total : 0;
-                const overallFraction = (i + chunkFraction) / totalChunks;
-                setUploadProgress(Math.min(95, Math.round(overallFraction * 95)));
-              },
-            });
-            chunkSuccess = true;
-            break;
-          } catch (chunkErr) {
-            if (controller.signal.aborted) {
-              throw chunkErr;
+              const forceRefresh = attempt > 1;
+              const freshToken = (await getIdToken(forceRefresh)) || token;
+              await sendXhrFormData<{ received: boolean }>({
+                url: resolveApiUrl(
+                  `/api/movies/chunked/${encodeURIComponent(createdUploadId!)}/part?chunkIndex=${i}`
+                ),
+                formData: chunkForm,
+                token: freshToken,
+                signal: controller.signal,
+                onProgress: (loaded, total) => {
+                  const chunkFraction = total > 0 ? loaded / total : 0;
+                  const overallFraction = (i + chunkFraction) / totalChunks;
+                  setUploadProgress(Math.min(95, Math.round(overallFraction * 95)));
+                },
+              });
+              chunkSuccess = true;
+              break;
+            } catch (chunkErr) {
+              if (controller.signal.aborted) {
+                throw chunkErr;
+              }
+              if (
+                chunkErr instanceof UploadHttpError &&
+                chunkErr.status === 413 &&
+                chunkSizeBytes > FALLBACK_CHUNK_SIZE_BYTES
+              ) {
+                throw chunkErr;
+              }
+              if (chunkErr instanceof UploadHttpError && chunkErr.status === 401 && attempt === 1) {
+                await getIdToken(true);
+              }
+              lastChunkError =
+                chunkErr instanceof Error ? chunkErr : new Error('Chunk upload failed.');
+              await new Promise((r) => setTimeout(r, 700 * attempt));
             }
-            lastChunkError =
-              chunkErr instanceof Error ? chunkErr : new Error('Chunk upload failed.');
-            await new Promise((r) => setTimeout(r, 700 * attempt));
+          }
+
+          if (!chunkSuccess) {
+            throw lastChunkError || new Error(`Failed uploading part ${i + 1} of ${totalChunks}.`);
           }
         }
 
-        if (!chunkSuccess) {
-          throw lastChunkError || new Error(`Failed uploading part ${i + 1} of ${totalChunks}.`);
+        setUploadStatusText('Finalizing movie file on server...');
+        setUploadProgress(96);
+
+        const completeForm = new FormData();
+        if (preparedPoster) {
+          completeForm.append('poster', preparedPoster);
+        }
+        appendMetadataFields(completeForm);
+
+        const finalToken = (await getIdToken(true)) || token;
+        const completed = await sendXhrFormData<{ movie: Movie }>({
+          url: resolveApiUrl(`/api/movies/chunked/${encodeURIComponent(createdUploadId)}/complete`),
+          formData: completeForm,
+          token: finalToken,
+          signal: controller.signal,
+        });
+        createdUploadId = null;
+        return completed.movie;
+      };
+
+      // Small videos <= 2 MB try direct single request first; auto-fallback to chunked if proxy returns 413
+      if (videoFile.size <= DEFAULT_CHUNK_SIZE_BYTES) {
+        try {
+          setUploadStatusText('Uploading movie file...');
+          const formData = new FormData();
+          formData.append('video', videoFile);
+          if (preparedPoster) {
+            formData.append('poster', preparedPoster);
+          }
+          appendMetadataFields(formData);
+
+          const parsed = await sendXhrFormData<{ movie: Movie }>({
+            url: resolveApiUrl('/api/movies'),
+            formData,
+            token,
+            signal: controller.signal,
+            onProgress: (loaded, total) => {
+              if (total > 0) {
+                setUploadProgress(Math.min(99, Math.round((loaded / total) * 100)));
+              }
+            },
+          });
+          setUploadProgress(100);
+          onUploaded(parsed.movie);
+          resetForm();
+          onClose();
+          return;
+        } catch (directErr) {
+          if (directErr instanceof UploadHttpError && directErr.status === 413) {
+            setUploadStatusText('Switching to smaller proxy-safe chunks...');
+            const fallbackMovie = await runChunkedUpload(FALLBACK_CHUNK_SIZE_BYTES);
+            setUploadProgress(100);
+            setUploadStatusText('Upload complete!');
+            onUploaded(fallbackMovie);
+            resetForm();
+            onClose();
+            return;
+          }
+          throw directErr;
         }
       }
 
-      setUploadStatusText('Finalizing movie file on server...');
-      setUploadProgress(96);
-
-      const completeForm = new FormData();
-      if (posterFile) {
-        completeForm.append('poster', posterFile);
+      // Chunked transfer for files > 2 MB (automatically adapts down to 768 KB on HTTP 413)
+      let movie: Movie;
+      try {
+        movie = await runChunkedUpload(DEFAULT_CHUNK_SIZE_BYTES);
+      } catch (chunkedErr) {
+        if (chunkedErr instanceof UploadHttpError && chunkedErr.status === 413) {
+          if (createdUploadId) {
+            void fetch(resolveApiUrl(`/api/movies/chunked/${encodeURIComponent(createdUploadId)}/abort`), {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` },
+            }).catch(() => {});
+            createdUploadId = null;
+          }
+          setUploadProgress(0);
+          setUploadStatusText('Retrying with 768 KB proxy-safe chunks...');
+          movie = await runChunkedUpload(FALLBACK_CHUNK_SIZE_BYTES);
+        } else {
+          throw chunkedErr;
+        }
       }
-      appendMetadataFields(completeForm);
 
-      const finalToken = (await getIdToken()) || token;
-      const completed = await sendXhrFormData<{ movie: Movie }>({
-        url: `/api/movies/chunked/${encodeURIComponent(createdUploadId)}/complete`,
-        formData: completeForm,
-        token: finalToken,
-        signal: controller.signal,
-      });
-
-      createdUploadId = null;
       setUploadProgress(100);
       setUploadStatusText('Upload complete!');
-      onUploaded(completed.movie);
+      onUploaded(movie);
       resetForm();
       onClose();
     } catch (err) {
       if (createdUploadId) {
-        void fetch(`/api/movies/chunked/${encodeURIComponent(createdUploadId)}/abort`, {
+        void fetch(resolveApiUrl(`/api/movies/chunked/${encodeURIComponent(createdUploadId)}/abort`), {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
         }).catch(() => {});
       }
+
+      if (err instanceof StaticHostUploadError) {
+        const cloudCfg = getCloudinaryConfig();
+        if (cloudCfg.isConfigured) {
+          try {
+            const cloudMovie = await uploadViaCloudinaryFallback(controller.signal, videoFile);
+            setUploadProgress(100);
+            setUploadStatusText('Upload complete!');
+            onUploaded(cloudMovie);
+            resetForm();
+            onClose();
+            return;
+          } catch (cloudErr) {
+            setError(
+              cloudErr instanceof Error
+                ? cloudErr.message
+                : 'Cloudinary upload failed. Please try again.'
+            );
+            return;
+          }
+        } else {
+          setNeedsCloudSetup(true);
+          setError(
+            'This site host has no Node upload backend at /api/movies. Enter your public Cloudinary Cloud Name and Unsigned Upload Preset below to upload directly from your browser.'
+          );
+          return;
+        }
+      }
+
+      console.error('[UploadMovieModal] Upload failed:', err);
       setError(err instanceof Error ? err.message : 'Movie upload failed. Please try again.');
     } finally {
       abortControllerRef.current = null;
@@ -648,6 +887,41 @@ export function UploadMovieModal({
             </div>
           )}
 
+          {needsCloudSetup && (
+            <div className="rounded-lg border border-[#E5A93B]/45 bg-[#09090B] p-3.5 space-y-2.5 text-xs">
+              <p className="font-semibold text-[#E5A93B]">
+                Direct Cloudinary Setup (Unsigned Preset Only — No API Key Required)
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={cloudNameInput}
+                  onChange={(e) => setCloudNameInput(e.target.value)}
+                  placeholder="Cloud Name (e.g. my-cinema)"
+                  aria-label="Cloudinary Cloud Name"
+                  className="w-full rounded-lg border border-[#27272A] bg-[#111114] px-3 py-2 text-xs text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
+                />
+                <input
+                  type="text"
+                  value={cloudPresetInput}
+                  onChange={(e) => setCloudPresetInput(e.target.value)}
+                  placeholder="Unsigned Upload Preset"
+                  aria-label="Cloudinary Unsigned Upload Preset"
+                  className="w-full rounded-lg border border-[#27272A] bg-[#111114] px-3 py-2 text-xs text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
+                />
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleSaveCloudSetup}
+                  className="rounded-lg bg-[#E5A93B] px-3.5 py-1.5 text-xs font-semibold text-[#09090B] hover:bg-[#F0B84F] cursor-pointer"
+                >
+                  Save & Continue Upload
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Video File Dropzone */}
           <div>
             <label className="block text-xs font-medium text-[#D4D4D8] mb-2">
@@ -678,7 +952,7 @@ export function UploadMovieModal({
               <input
                 ref={videoInputRef}
                 type="file"
-                accept=".mp4,.webm,.mkv,.mov,video/mp4,video/webm,video/x-matroska,video/quicktime"
+                accept="video/*,.mp4,.webm,.mkv,.mov,.m4v"
                 className="hidden"
                 onChange={(e) => {
                   const selected = e.target.files?.[0];

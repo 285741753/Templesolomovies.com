@@ -16,6 +16,7 @@ import {
   ExternalLink,
   Settings,
   ShieldCheck,
+  Gamepad2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { LANGUAGES, useLanguage } from '../contexts/LanguageContext';
@@ -24,7 +25,7 @@ import { PWAInstallButton } from './PWAInstallButton';
 import { TempleLogoIcon } from './TempleLogo';
 import type { UserWatchStats } from './MyStatsModal';
 
-export type AppMainView = 'home' | 'search' | 'downloads' | 'lounge';
+export type AppMainView = 'home' | 'search' | 'downloads' | 'games' | 'lounge';
 
 interface HeaderProps {
   activeView: AppMainView;
@@ -117,20 +118,19 @@ export function Header({
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const catalog = document.getElementById('catalog');
-    catalog?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    onSelectView('search', 'search-page');
   };
 
   return (
     <header className="sticky top-0 z-40 border-b border-[#27272A] bg-[#09090B]/95 backdrop-blur-md">
-      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 sm:gap-5 px-4 py-3 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-[1440px] flex-wrap md:flex-nowrap items-center justify-between gap-x-2.5 gap-y-2.5 sm:gap-5 px-3 sm:px-6 lg:px-8 py-2.5 sm:py-3 min-w-0">
         {/* Zone 1: Scalable Temple Cinema SVG Icon (28px) & Gold Wordmark */}
         <button
           type="button"
           onClick={() => onSelectView('home', 'spotlight')}
-          className="flex items-center gap-2.5 text-sm sm:text-base font-bold tracking-[0.14em] uppercase text-[#E6A93C] whitespace-nowrap shrink-0 font-display cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E6A93C]"
+          className="flex items-center gap-2 text-xs sm:text-base font-bold tracking-[0.08em] sm:tracking-[0.14em] uppercase text-[#E6A93C] whitespace-nowrap shrink-0 font-display cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E6A93C]"
         >
-          <TempleLogoIcon className="h-7 w-7 shrink-0" />
+          <TempleLogoIcon className="h-6 w-6 sm:h-7 sm:w-7 shrink-0" />
           <span>{t('templeBrand')}</span>
         </button>
 
@@ -166,19 +166,19 @@ export function Header({
             type="button"
             onClick={() => {
               onSelectCollection('all');
-              onSelectView('search', 'catalog');
+              onSelectView('search', 'search-page');
             }}
             className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeView === 'search' ? 'text-[#E6A93C] font-semibold' : 'hover:text-[#FAFAFA]'
             }`}
           >
-            {t('navCatalog')}
+            {t('navSearch')}
           </button>
           <button
             type="button"
             onClick={() => {
               onSelectCollection('saved');
-              onSelectView('search', 'catalog');
+              onSelectView('downloads', 'catalog');
             }}
             className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -189,13 +189,23 @@ export function Header({
               type="button"
               onClick={() => {
                 onSelectCollection('uploads');
-                onSelectView('search', 'catalog');
+                onSelectView('downloads', 'catalog');
               }}
               className="hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {t('navUploads')}
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => onSelectView('games')}
+            className={`inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'games' ? 'text-[#E6A93C] font-semibold' : 'hover:text-[#FAFAFA]'
+            }`}
+          >
+            <Gamepad2 className="h-3.5 w-3.5 text-[#E5A93B] shrink-0" aria-hidden="true" />
+            <span>Games</span>
+          </button>
           <button
             type="button"
             onClick={() => onSelectView('lounge')}
@@ -231,40 +241,44 @@ export function Header({
           </a>
         </nav>
 
-        {/* Global Pill Search Bar */}
-        <form
-          onSubmit={handleSearchSubmit}
-          role="search"
-          aria-label="Global movie search"
-          className="relative flex-1 max-w-[200px] sm:max-w-xs lg:max-w-sm"
-        >
-          <Search
-            className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#A1A1AA]"
-            aria-hidden="true"
-          />
-          <input
-            ref={searchInputRef}
-            type="search"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            placeholder={t('searchMoviesPlaceholder')}
-            aria-label={t('searchMoviesPlaceholder')}
-            className="w-full rounded-full border border-[#3F3F46] bg-[#141418] py-2 pl-10 pr-8 text-xs sm:text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none transition-colors"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => onSearchChange('')}
-              aria-label={t('clearSearch')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 rounded p-0.5 text-[#71717A] hover:text-[#FAFAFA] cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
-          )}
-        </form>
+        {/* Global Pill Search Bar + Gold Download App Button */}
+        <div className="order-last w-full md:order-none md:flex-1 md:max-w-lg flex items-center gap-2 min-w-0">
+          <form
+            onSubmit={handleSearchSubmit}
+            role="search"
+            aria-label="Global movie search"
+            className="relative flex-1 min-w-0"
+          >
+            <Search
+              className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#A1A1AA]"
+              aria-hidden="true"
+            />
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              placeholder={t('searchMoviesPlaceholder')}
+              aria-label={t('searchMoviesPlaceholder')}
+              className="w-full rounded-full border border-[#3F3F46] bg-[#141418] py-2 pl-10 pr-8 text-base text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none transition-colors"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => onSearchChange('')}
+                aria-label={t('clearSearch')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 rounded p-0.5 text-[#71717A] hover:text-[#FAFAFA] cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            )}
+          </form>
+
+          <PWAInstallButton variant="header" />
+        </div>
 
         {/* Zone 3: Language Switcher + Install Prompt + Account Menu */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {/* Language Switcher */}
           <div className="relative" ref={langMenuRef}>
             <button
@@ -276,7 +290,7 @@ export function Header({
               aria-expanded={langMenuOpen}
               aria-haspopup="listbox"
               aria-label={`${t('languageLabel')}: ${currentLang.nativeName}`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#111114] px-2.5 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-lg border border-[#27272A] bg-[#111114] px-2 sm:px-2.5 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Globe className="h-3.5 w-3.5 text-[#E5A93B] shrink-0" aria-hidden="true" />
               <span className="font-mono">{currentLang.shortLabel}</span>
@@ -287,7 +301,7 @@ export function Header({
               <div
                 role="listbox"
                 aria-label={t('languageLabel')}
-                className="absolute right-0 top-full mt-2 w-44 rounded-xl border border-[#27272A] bg-[#111114] p-1.5 shadow-2xl z-50"
+                className="absolute right-0 top-full mt-2 w-44 max-w-[calc(100vw-1.5rem)] rounded-xl border border-[#27272A] bg-[#111114] p-1.5 shadow-2xl z-50"
               >
                 {LANGUAGES.map((lang) => {
                   const selected = lang.code === language;
@@ -321,6 +335,20 @@ export function Header({
 
           <button
             type="button"
+            onClick={() => onSelectView('games')}
+            aria-label="Games"
+            className={`hidden sm:inline-flex xl:hidden min-h-[38px] items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'games'
+                ? 'border-[#E5A93B] bg-[#E5A93B]/15 text-[#E5A93B]'
+                : 'border-[#27272A] bg-[#111114] text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA]'
+            }`}
+          >
+            <Gamepad2 className="h-3.5 w-3.5 text-[#E5A93B] shrink-0" aria-hidden="true" />
+            <span>Games</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               setLangMenuOpen(false);
               setMenuOpen(false);
@@ -328,13 +356,11 @@ export function Header({
             }}
             aria-label={t('settingsTitle')}
             title={t('settingsTitle')}
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#111114] px-2.5 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#111114] px-2.5 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 touch-manipulation cursor-pointer"
           >
             <Settings className="h-3.5 w-3.5 text-[#E5A93B] shrink-0" aria-hidden="true" />
             <span className="hidden md:inline">{t('settingsTitle')}</span>
           </button>
-
-          <PWAInstallButton />
 
           <div className="relative" ref={menuRef}>
             {user ? (
@@ -346,17 +372,17 @@ export function Header({
                     setLangMenuOpen(false);
                   }}
                   aria-expanded={menuOpen}
-                  className="inline-flex items-center gap-2 rounded-lg border border-[#27272A] bg-[#18181B] px-3.5 py-2 text-xs sm:text-sm font-medium text-[#FAFAFA] hover:border-[#3F3F46] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 sm:gap-2 rounded-lg border border-[#27272A] bg-[#18181B] px-2.5 sm:px-3.5 py-2 text-xs sm:text-sm font-medium text-[#FAFAFA] hover:border-[#3F3F46] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <UserIcon className="h-4 w-4 text-[#E5A93B] shrink-0" aria-hidden="true" />
-                  <span className="max-w-[130px] truncate">
+                  <span className="max-w-[76px] sm:max-w-[130px] truncate">
                     {profile?.displayName || user.displayName || 'Account'}
                   </span>
                   <ChevronDown className="h-3.5 w-3.5 text-[#A1A1AA] shrink-0" aria-hidden="true" />
                 </button>
 
               {menuOpen && (
-                <div className="absolute right-0 top-full mt-2 w-64 rounded-xl border border-[#27272A] bg-[#111114] p-1.5 shadow-2xl">
+                <div className="absolute right-0 top-full mt-2 w-64 max-w-[calc(100vw-1.5rem)] rounded-xl border border-[#27272A] bg-[#111114] p-1.5 shadow-2xl z-50">
                   <div className="border-b border-[#27272A] px-3 py-2 mb-1">
                     <p className="text-xs font-semibold text-[#FAFAFA] truncate">
                       {profile?.displayName || user.displayName || 'Member'}

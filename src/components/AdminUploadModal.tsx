@@ -14,11 +14,17 @@ import {
   X,
 } from 'lucide-react';
 import {
+  clearLocalCloudinaryConfig,
+  compressPosterIfNeeded,
   getCloudinaryConfig,
+  resolveApiUrl,
+  saveLocalCloudinaryConfig,
   uploadToCloudinaryUnsigned,
   validatePosterFile,
   validateVideoFile,
 } from '../services/cloudinary';
+import { useAuth } from '../contexts/AuthContext';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 import type { HomeCategoryChip, Movie, MovieGenre, MovieQuality } from '../types/cinema';
 import { formatDurationSeconds, formatFileSize } from '../utils/format';
 
@@ -82,7 +88,13 @@ export function AdminUploadModal({
   onDeleteMovie,
   onNotify,
 }: AdminUploadModalProps) {
-  const cloudinaryConfig = useMemo(() => getCloudinaryConfig(), []);
+  const { getIdToken } = useAuth();
+  const [cloudinaryConfig, setCloudinaryConfig] = useState(() => getCloudinaryConfig());
+  const [uploadTarget, setUploadTarget] = useState<'cloudinary' | 'server'>(() =>
+    getCloudinaryConfig().isConfigured ? 'cloudinary' : 'server'
+  );
+  const [cloudNameInput, setCloudNameInput] = useState(() => getCloudinaryConfig().cloudName);
+  const [presetInput, setPresetInput] = useState(() => getCloudinaryConfig().uploadPreset);
   const [activeTab, setActiveTab] = useState<AdminTab>('upload');
 
   // Upload form fields
@@ -106,6 +118,7 @@ export function AdminUploadModal({
   const [isUploading, setIsUploading] = useState(false);
   const [posterProgress, setPosterProgress] = useState(0);
   const [videoProgress, setVideoProgress] = useState(0);
+  const [uploadStatusNote, setUploadStatusNote] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -135,6 +148,23 @@ export function AdminUploadModal({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isOpen, isUploading, onClose]);
+
+  const { setBusyActivity } = usePWAInstall();
+
+  useEffect(() => {
+    setBusyActivity('upload', isUploading);
+    if (!isUploading) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = 'Upload in progress.';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      setBusyActivity('upload', false);
+    };
+  }, [isUploading, setBusyActivity]);
 
   useEffect(() => {
     return () => {
@@ -218,18 +248,319 @@ export function AdminUploadModal({
     setIsUploading(false);
   };
 
+  const handleSaveCloudSettings = () => {
+    const cleanCloud = cloudNameInput.trim();
+    const cleanPreset = presetInput.trim();
+    if (!cleanCloud || !cleanPreset) {
+      setFormError('Enter both your public Cloudinary Cloud Name and Unsigned Upload Preset.');
+      return;
+    }
+    saveLocalCloudinaryConfig(cleanCloud, cleanPreset);
+    const updated = getCloudinaryConfig();
+    setCloudinaryConfig(updated);
+    setUploadTarget('cloudinary');
+    setFormError(null);
+    onNotify('Saved public Cloudinary preset for direct browser uploads.');
+  };
+
+  const handleClearCloudSettings = () => {
+    clearLocalCloudinaryConfig();
+    const updated = getCloudinaryConfig();
+    setCloudinaryConfig(updated);
+    setCloudNameInput(updated.cloudName);
+    setPresetInput(updated.uploadPreset);
+    if (!updated.isConfigured) {
+      setUploadTarget('server');
+    }
+  };
+
+  const uploadViaVaultServer = async (params: {
+    cleanTitle: string;
+    cleanDescription: string;
+    parsedYear: number;
+    cleanRuntime: string;
+    cleanTrailer: string;
+    video: File;
+    poster: File | null;
+    signal: AbortSignal;
+  }): Promise<Movie> => {
+    const token = await getIdToken();
+    if (!token) {
+      throw new Error('Administrator sign-in required for Temple Vault Server uploads.');
+    }
+
+    const DEFAULT_CHUNK = 2 * 1024 * 1024;
+    const FALLBACK_CHUNK = 768 * 1024;
+    const preparedPoster = params.poster
+      ? await compressPosterIfNeeded(params.poster, 750 * 1024)
+      : null;
+
+    class ServerHttpError extends Error {
+      status: number;
+      constructor(status: number, message: string) {
+        super(message);
+        this.status = status;
+      }
+    }
+
+    const appendFields = (fd: FormData) => {
+      fd.append('title', params.cleanTitle);
+      fd.append('genre', genre);
+      fd.append('category', category);
+      fd.append('ageRating', ageRating);
+      fd.append('year', String(params.parsedYear));
+      fd.append('duration', params.cleanRuntime);
+      fd.append('quality', quality);
+      fd.append('uploader', defaultUploader || 'TempleSolo Admin');
+      fd.append('synopsis', params.cleanDescription);
+      if (params.cleanTrailer) fd.append('trailerUrl', params.cleanTrailer);
+    };
+
+    const isStaticSpaResponse = (status: number, contentType: string, bodyText: string) => {
+      if (!contentType.includes('text/html')) {
+        return status === 404 || status === 405;
+      }
+      if (status === 413 || status >= 500) return false;
+      return status === 200 || status === 404 || status === 405 || bodyText.includes('<div id="root">');
+    };
+
+    const sendXhr = <T,>(
+      endpointPath: string,
+      fd: FormData,
+      bearer: string,
+      onProg?: (l: number, tot: number) => void
+    ) =>
+      new Promise<T>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        let done = false;
+        const onAb = () => {
+          try {
+            xhr.abort();
+          } catch {
+            // ignore
+          }
+          if (!done) {
+            done = true;
+            reject(new Error('Upload cancelled.'));
+          }
+        };
+        if (params.signal.aborted) {
+          onAb();
+          return;
+        }
+        params.signal.addEventListener('abort', onAb, { once: true });
+        xhr.open('POST', resolveApiUrl(endpointPath), true);
+        xhr.timeout = 120_000;
+        xhr.setRequestHeader('Authorization', `Bearer ${bearer}`);
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable && onProg) onProg(ev.loaded, ev.total);
+        };
+        xhr.onload = () => {
+          if (done) return;
+          done = true;
+          params.signal.removeEventListener('abort', onAb);
+          const ct = (xhr.getResponseHeader('content-type') || '').toLowerCase();
+          const rawText = xhr.responseText || '';
+          if (!ct.includes('application/json')) {
+            if (isStaticSpaResponse(xhr.status, ct, rawText)) {
+              reject(
+                new ServerHttpError(
+                  xhr.status,
+                  'This site host has no active Node upload server at /api/movies. Switch to Cloudinary Direct above and enter your Cloud Name + Unsigned Preset.'
+                )
+              );
+              return;
+            }
+            const snippet = rawText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+            reject(
+              new ServerHttpError(
+                xhr.status || 500,
+                snippet
+                  ? `Server error (HTTP ${xhr.status}): ${snippet}`
+                  : `Upload server returned HTTP ${xhr.status || 500}.`
+              )
+            );
+            return;
+          }
+          try {
+            const parsed = JSON.parse(rawText || '{}') as T & { error?: string };
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(parsed);
+            } else {
+              reject(
+                new ServerHttpError(
+                  xhr.status,
+                  parsed.error || `Server upload failed (HTTP ${xhr.status}).`
+                )
+              );
+            }
+          } catch {
+            reject(new ServerHttpError(xhr.status, `Invalid server JSON response (HTTP ${xhr.status}).`));
+          }
+        };
+        xhr.onerror = () => {
+          if (!done) {
+            done = true;
+            params.signal.removeEventListener('abort', onAb);
+            reject(new Error('Network error reaching upload server. Check your connection and retry.'));
+          }
+        };
+        xhr.ontimeout = () => {
+          if (!done) {
+            done = true;
+            params.signal.removeEventListener('abort', onAb);
+            reject(new Error('Upload request timed out (120s). Please retry.'));
+          }
+        };
+        xhr.send(fd);
+      });
+
+    const runChunked = async (chunkSize: number): Promise<Movie> => {
+      const totalChunks = Math.ceil(params.video.size / chunkSize);
+      setUploadStatusNote(`Starting chunked transfer (${totalChunks} parts)...`);
+      const initRes = await fetch(resolveApiUrl('/api/movies/chunked/init'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        signal: params.signal,
+        body: JSON.stringify({
+          fileName: params.video.name,
+          mimeType: params.video.type || 'video/mp4',
+          fileSizeBytes: params.video.size,
+          totalChunks,
+        }),
+      });
+      const initCt = (initRes.headers.get('content-type') || '').toLowerCase();
+      const initRaw = await initRes.text();
+      if (!initCt.includes('application/json')) {
+        if (isStaticSpaResponse(initRes.status, initCt, initRaw)) {
+          throw new Error(
+            'This host is serving static files only (no Node upload backend). Select Cloudinary Direct above and enter your Cloud Name + Unsigned Upload Preset.'
+          );
+        }
+        throw new ServerHttpError(
+          initRes.status,
+          `Could not initialize chunked upload (HTTP ${initRes.status}).`
+        );
+      }
+      const initJson = JSON.parse(initRaw || '{}') as { uploadId?: string; error?: string };
+      if (!initRes.ok || !initJson.uploadId) {
+        throw new ServerHttpError(
+          initRes.status,
+          initJson.error || `Could not start chunked upload (HTTP ${initRes.status}).`
+        );
+      }
+      const uploadId = initJson.uploadId;
+
+      try {
+        for (let i = 0; i < totalChunks; i += 1) {
+          if (params.signal.aborted) throw new Error('Upload cancelled.');
+          const chunkBlob = params.video.slice(
+            i * chunkSize,
+            Math.min(params.video.size, (i + 1) * chunkSize)
+          );
+
+          let uploaded = false;
+          let lastErr: Error | null = null;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try {
+              setUploadStatusNote(
+                attempt > 1
+                  ? `Retrying chunk ${i + 1} of ${totalChunks} (attempt ${attempt})...`
+                  : `Uploading chunk ${i + 1} of ${totalChunks}...`
+              );
+              const fd = new FormData();
+              fd.append('chunkIndex', String(i));
+              fd.append('chunk', chunkBlob, `${params.video.name}.part${i}`);
+              const freshToken = (await getIdToken(attempt > 1)) || token;
+              await sendXhr<{ received: boolean }>(
+                `/api/movies/chunked/${encodeURIComponent(uploadId)}/part?chunkIndex=${i}`,
+                fd,
+                freshToken,
+                (l, tot) => {
+                  const frac = (i + (tot > 0 ? l / tot : 0)) / totalChunks;
+                  setVideoProgress(Math.min(95, Math.round(frac * 95)));
+                }
+              );
+              uploaded = true;
+              break;
+            } catch (err) {
+              if (params.signal.aborted) throw err;
+              if (err instanceof ServerHttpError && err.status === 413 && chunkSize > FALLBACK_CHUNK) {
+                throw err;
+              }
+              if (err instanceof ServerHttpError && err.status === 401 && attempt === 1) {
+                await getIdToken(true);
+              }
+              lastErr = err instanceof Error ? err : new Error('Chunk upload failed.');
+              await new Promise((r) => setTimeout(r, 700 * attempt));
+            }
+          }
+          if (!uploaded) {
+            throw lastErr || new Error(`Failed uploading chunk ${i + 1} of ${totalChunks}.`);
+          }
+        }
+
+        setUploadStatusNote('Finalizing movie on server...');
+        const completeFd = new FormData();
+        if (preparedPoster) completeFd.append('poster', preparedPoster);
+        appendFields(completeFd);
+        const finalToken = (await getIdToken(true)) || token;
+        const done = await sendXhr<{ movie: Movie }>(
+          `/api/movies/chunked/${encodeURIComponent(uploadId)}/complete`,
+          completeFd,
+          finalToken
+        );
+        setPosterProgress(100);
+        setVideoProgress(100);
+        return done.movie;
+      } catch (err) {
+        void fetch(resolveApiUrl(`/api/movies/chunked/${encodeURIComponent(uploadId)}/abort`), {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => {});
+        throw err;
+      }
+    };
+
+    if (params.video.size <= DEFAULT_CHUNK) {
+      try {
+        setUploadStatusNote('Uploading movie to Temple Vault Server...');
+        const fd = new FormData();
+        fd.append('video', params.video);
+        if (preparedPoster) fd.append('poster', preparedPoster);
+        appendFields(fd);
+        const res = await sendXhr<{ movie: Movie }>('/api/movies', fd, token, (l, tot) => {
+          if (tot > 0) setVideoProgress(Math.min(99, Math.round((l / tot) * 100)));
+        });
+        setPosterProgress(100);
+        setVideoProgress(100);
+        return res.movie;
+      } catch (err) {
+        if (err instanceof ServerHttpError && err.status === 413) {
+          return runChunked(FALLBACK_CHUNK);
+        }
+        throw err;
+      }
+    }
+
+    try {
+      return await runChunked(DEFAULT_CHUNK);
+    } catch (err) {
+      if (err instanceof ServerHttpError && err.status === 413) {
+        setVideoProgress(0);
+        setUploadStatusNote('Proxy rejected 2 MB chunk — retrying with 768 KB chunks...');
+        return runChunked(FALLBACK_CHUNK);
+      }
+      throw err;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-
-    if (!cloudinaryConfig.isConfigured) {
-      setFormError(
-        `Cloudinary uploads are unavailable because ${cloudinaryConfig.missingVars.join(' and ')} ${
-          cloudinaryConfig.missingVars.length === 1 ? 'is' : 'are'
-        } not configured.`
-      );
-      return;
-    }
 
     const cleanTitle = title.trim();
     if (!cleanTitle) {
@@ -237,18 +568,27 @@ export function AdminUploadModal({
       return;
     }
 
-    if (!posterFile) {
-      setFormError('Please select a poster image (JPG, PNG, or WEBP, max 5 MB).');
-      return;
-    }
-    const posterValidationError = validatePosterFile(posterFile);
-    if (posterValidationError) {
-      setFormError(posterValidationError);
+    if (uploadTarget === 'cloudinary' && !cloudinaryConfig.isConfigured) {
+      setFormError(
+        'Enter your public Cloudinary Cloud Name & Unsigned Upload Preset above and click Save Preset, or switch to Temple Vault Server.'
+      );
       return;
     }
 
+    if (uploadTarget === 'cloudinary' && !posterFile) {
+      setFormError('Please select a poster image (JPG, PNG, or WEBP, max 10 MB).');
+      return;
+    }
+    if (posterFile) {
+      const posterValidationError = validatePosterFile(posterFile);
+      if (posterValidationError) {
+        setFormError(posterValidationError);
+        return;
+      }
+    }
+
     if (!videoFile) {
-      setFormError('Please select a video file (MP4 or WEBM, max 100 MB).');
+      setFormError('Please select a video file (MP4, WEBM, MKV, or MOV, up to 2 GB).');
       return;
     }
     const videoValidationError = validateVideoFile(videoFile);
@@ -273,10 +613,30 @@ export function AdminUploadModal({
     setIsUploading(true);
     setPosterProgress(0);
     setVideoProgress(0);
+    setUploadStatusNote('');
 
     try {
+      if (uploadTarget === 'server') {
+        const uploadedMovie = await uploadViaVaultServer({
+          cleanTitle,
+          cleanDescription,
+          parsedYear,
+          cleanRuntime,
+          cleanTrailer,
+          video: videoFile,
+          poster: posterFile,
+          signal: controller.signal,
+        });
+        onCreateMovie(uploadedMovie);
+        onNotify(`"${uploadedMovie.title}" uploaded and published to Home, Trending, and Search!`);
+        resetUploadForm();
+        setActiveTab('manage');
+        return;
+      }
+
+      setUploadStatusNote('Uploading poster and video to Cloudinary...');
       const [posterRes, videoRes] = await Promise.all([
-        uploadToCloudinaryUnsigned(posterFile, {
+        uploadToCloudinaryUnsigned(posterFile!, {
           folder: 'temple-cinema/posters',
           onProgress: (pct) => setPosterProgress(pct),
           signal: controller.signal,
@@ -325,14 +685,33 @@ export function AdminUploadModal({
         createdAt: new Date().toISOString(),
       };
 
+      // Best-effort sync to backend if Node server is available
+      try {
+        const token = await getIdToken();
+        if (token) {
+          await fetch(resolveApiUrl('/api/movies/cloudinary'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(newMovie),
+          });
+        }
+      } catch {
+        // Static CDN deploy keeps movie in local catalog cleanly
+      }
+
       onCreateMovie(newMovie);
       onNotify(`"${newMovie.title}" uploaded via Cloudinary and published to Home, Trending, and Search!`);
       resetUploadForm();
       setActiveTab('manage');
     } catch (err) {
+      console.error('[AdminUploadModal] Upload failed:', err);
       setFormError(err instanceof Error ? err.message : 'Upload failed. Please try again.');
     } finally {
       setIsUploading(false);
+      setUploadStatusNote('');
       abortControllerRef.current = null;
     }
   };
@@ -458,26 +837,95 @@ export function AdminUploadModal({
             onSubmit={handleSubmit}
             className="p-5 sm:p-6 space-y-5 max-h-[78vh] overflow-y-auto"
           >
-            {!cloudinaryConfig.isConfigured && (
-              <div
-                role="alert"
-                className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-200"
-              >
-                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" aria-hidden="true" />
-                <div className="space-y-1">
-                  <p className="font-semibold text-amber-100">
-                    Cloudinary environment variables not configured
-                  </p>
-                  <p className="text-amber-200/90 leading-relaxed">
-                    Missing{' '}
-                    <span className="font-mono text-amber-100">
-                      {cloudinaryConfig.missingVars.join(', ')}
-                    </span>
-                    . Add them to your environment configuration (unsigned upload preset only — never expose API secret in the frontend) and reload to publish directly to Cloudinary.
-                  </p>
+            {/* Upload Destination Switcher + Optional Public Cloudinary Unsigned Preset */}
+            <div className="rounded-xl border border-[#27272A] bg-[#09090B] p-3.5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-[#FAFAFA]">Upload Destination</span>
+                <div className="grid grid-cols-2 gap-1.5 rounded-lg border border-[#27272A] bg-[#111114] p-1">
+                  <button
+                    type="button"
+                    disabled={isUploading}
+                    onClick={() => setUploadTarget('cloudinary')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                      uploadTarget === 'cloudinary'
+                        ? 'bg-[#E6A93C] text-[#0A0A0C] font-semibold'
+                        : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
+                    }`}
+                  >
+                    Cloudinary Direct
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isUploading}
+                    onClick={() => setUploadTarget('server')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                      uploadTarget === 'server'
+                        ? 'bg-[#E6A93C] text-[#0A0A0C] font-semibold'
+                        : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
+                    }`}
+                  >
+                    Temple Vault Server
+                  </button>
                 </div>
               </div>
-            )}
+
+              {uploadTarget === 'cloudinary' && !cloudinaryConfig.isConfigured && (
+                <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-3 space-y-2.5 text-xs">
+                  <p className="text-amber-100 font-medium">
+                    Connect Cloudinary (Unsigned Upload Preset only — no API key or secret)
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={cloudNameInput}
+                      onChange={(e) => setCloudNameInput(e.target.value)}
+                      placeholder="Public Cloud Name (e.g. my-cinema)"
+                      aria-label="Cloudinary Cloud Name"
+                      className="min-h-[40px] w-full rounded-lg border border-[#27272A] bg-[#111114] px-3 py-1.5 text-xs text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E6A93C] focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      value={presetInput}
+                      onChange={(e) => setPresetInput(e.target.value)}
+                      placeholder="Unsigned Upload Preset (e.g. temple_unsigned)"
+                      aria-label="Cloudinary Unsigned Upload Preset"
+                      className="min-h-[40px] w-full rounded-lg border border-[#27272A] bg-[#111114] px-3 py-1.5 text-xs text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E6A93C] focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] text-amber-200/80">
+                      Or use Temple Vault Server when self-hosting Node backend.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSaveCloudSettings}
+                      className="min-h-[36px] rounded-lg bg-[#E6A93C] px-3.5 py-1.5 text-xs font-bold text-[#0A0A0C] hover:bg-[#F5C563] cursor-pointer"
+                    >
+                      Save Preset
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {uploadTarget === 'cloudinary' && cloudinaryConfig.isConfigured && (
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-[#A1A1AA]">
+                  <span>
+                    Active cloud: <strong className="text-[#E6A93C]">{cloudinaryConfig.cloudName}</strong> · preset:{' '}
+                    <strong className="text-[#FAFAFA]">{cloudinaryConfig.uploadPreset}</strong>
+                  </span>
+                  {cloudinaryConfig.source === 'local' && (
+                    <button
+                      type="button"
+                      disabled={isUploading}
+                      onClick={handleClearCloudSettings}
+                      className="text-[#71717A] hover:text-red-300 cursor-pointer"
+                    >
+                      Change preset
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
 
             {formError && (
               <div
@@ -499,7 +947,7 @@ export function AdminUploadModal({
                     Poster Image
                   </span>
                   <span className="font-mono text-[10px] text-[#71717A]">
-                    JPG / PNG / WEBP · Max 5 MB
+                    JPG / PNG / WEBP · Max 10 MB
                   </span>
                 </div>
 
@@ -532,8 +980,10 @@ export function AdminUploadModal({
                   ) : (
                     <div className="p-4 text-center">
                       <ImageIcon className="mx-auto h-6 w-6 text-[#E6A93C] mb-1.5" aria-hidden="true" />
-                      <p className="text-xs font-medium text-[#FAFAFA]">Tap to select poster</p>
-                      <p className="text-[11px] text-[#71717A] mt-0.5">Up to 5 MB</p>
+                      <p className="text-xs font-medium text-[#FAFAFA]">
+                        {uploadTarget === 'server' ? 'Optional poster cover' : 'Tap to select poster'}
+                      </p>
+                      <p className="text-[11px] text-[#71717A] mt-0.5">Up to 10 MB</p>
                     </div>
                   )}
                 </div>
@@ -561,7 +1011,7 @@ export function AdminUploadModal({
                 )}
               </div>
 
-              {/* Video File Upload (MP4/WEBM, max 100 MB) */}
+              {/* Video File Upload (MP4/WEBM/MKV/MOV, up to 2 GB) */}
               <div className="rounded-xl border border-[#27272A] bg-[#09090B] p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-[#FAFAFA] flex items-center gap-1.5">
@@ -569,14 +1019,14 @@ export function AdminUploadModal({
                     Video File
                   </span>
                   <span className="font-mono text-[10px] text-[#71717A]">
-                    MP4 / WEBM · Max 100 MB
+                    MP4 / WEBM / MKV / MOV · Max 2 GB
                   </span>
                 </div>
 
                 <input
                   ref={videoInputRef}
                   type="file"
-                  accept="video/mp4,video/webm,.mp4,.webm"
+                  accept="video/*,.mp4,.webm,.mkv,.mov,.m4v"
                   className="hidden"
                   onChange={(e) => handleSelectVideo(e.target.files?.[0])}
                 />
@@ -615,7 +1065,9 @@ export function AdminUploadModal({
                   >
                     <Film className="h-6 w-6 text-[#E6A93C] mb-1.5" aria-hidden="true" />
                     <p className="text-xs font-medium text-[#FAFAFA]">Tap to select video</p>
-                    <p className="text-[11px] text-[#71717A] mt-0.5">MP4 or WEBM · Up to 100 MB</p>
+                    <p className="text-[11px] text-[#71717A] mt-0.5">
+                      MP4, WEBM, MKV, MOV · Up to 2 GB
+                    </p>
                   </div>
                 )}
 
@@ -823,6 +1275,10 @@ export function AdminUploadModal({
               </div>
             </div>
 
+            {uploadStatusNote && isUploading && (
+              <p className="text-xs font-mono text-[#E6A93C]">{uploadStatusNote}</p>
+            )}
+
             {/* Footer Actions */}
             <div className="flex flex-wrap items-center justify-end gap-3 pt-3 border-t border-[#27272A]">
               {isUploading ? (
@@ -845,11 +1301,17 @@ export function AdminUploadModal({
 
               <button
                 type="submit"
-                disabled={isUploading || !cloudinaryConfig.isConfigured}
+                disabled={isUploading}
                 className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#E6A93C] px-5 py-2 text-xs sm:text-sm font-bold text-[#0A0A0C] hover:bg-[#F5C563] disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
               >
                 <Upload className="h-4 w-4" aria-hidden="true" />
-                <span>{isUploading ? 'Uploading to Cloudinary...' : 'Upload & Publish'}</span>
+                <span>
+                  {isUploading
+                    ? uploadTarget === 'cloudinary'
+                      ? 'Uploading to Cloudinary...'
+                      : `Uploading (${videoProgress}%)...`
+                    : 'Upload & Publish'}
+                </span>
               </button>
             </div>
           </form>

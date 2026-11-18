@@ -108,7 +108,7 @@ export function CommunityChat({
     <aside
       id="community-chat"
       aria-label="Community Chat"
-      className="flex flex-col rounded-xl border border-[#27272A] bg-[#111114] overflow-hidden h-[620px] lg:h-[calc(100vh-110px)] lg:sticky lg:top-[76px]"
+      className="flex w-full max-w-full min-w-0 flex-col rounded-xl border border-[#27272A] bg-[#111114] overflow-hidden h-[620px] lg:h-[calc(100vh-110px)] lg:sticky lg:top-[76px]"
     >
       {/* Chat Header */}
       <div className="border-b border-[#27272A] px-4 py-3.5 bg-[#111114]">
@@ -192,8 +192,7 @@ export function CommunityChat({
                 }}
                 maxLength={32}
                 aria-label="Your chat display name"
-                autoFocus
-                className="flex-1 rounded-md border border-[#E5A93B] bg-[#09090B] px-2 py-1 text-xs text-[#FAFAFA] focus:outline-none"
+                className="flex-1 min-w-0 rounded-md border border-[#E5A93B] bg-[#09090B] px-2 py-1 text-base text-[#FAFAFA] focus:outline-none"
               />
               <button
                 type="button"
@@ -433,7 +432,7 @@ export function CommunityChat({
               placeholder={t('messageRoomPlaceholder', { room: activeRoomMeta.label })}
               aria-label={t('messageRoomPlaceholder', { room: activeRoomMeta.label })}
             maxLength={1000}
-            className="flex-1 rounded-lg border border-[#27272A] bg-[#111114] px-3 py-2 text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
+            className="flex-1 min-w-0 rounded-lg border border-[#27272A] bg-[#111114] px-3 py-2 text-base text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
           />
           <button
             type="submit"

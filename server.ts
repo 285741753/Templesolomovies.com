@@ -9,11 +9,15 @@ import { randomUUID } from 'crypto';
 import zlib from 'zlib';
 import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
+import { attachFootballServer } from './server/footballSocket.ts';
 import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
 import type {
   BrokenLinkReport,
   ChatMessage,
   ChatRoomId,
+  ChessRoomMovePayload,
+  ChessRoomState,
+  ChessRoomSummary,
   ClientWsEvent,
   Movie,
   MovieGenre,
@@ -104,7 +108,11 @@ async function verifyFirebaseIdToken(
         body: JSON.stringify({ idToken }),
       }
     );
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      console.warn(`[Upload Auth] Firebase token verification failed (HTTP ${resp.status}): ${errText.slice(0, 180)}`);
+      return null;
+    }
     const data = (await resp.json()) as {
       users?: Array<{
         localId?: string;
@@ -122,7 +130,8 @@ async function verifyFirebaseIdToken(
       displayName: user.displayName,
       idToken,
     };
-  } catch {
+  } catch (err) {
+    console.error('[Upload Auth] Token verification network/parse error:', err);
     return null;
   }
 }
@@ -143,7 +152,8 @@ async function isAdminUser(verifiedUser: VerifiedFirebaseUser | null): Promise<b
       headers: { Authorization: `Bearer ${verifiedUser.idToken}` },
     });
     return resp.ok;
-  } catch {
+  } catch (err) {
+    console.warn('[Upload Auth] Admin lookup check failed:', err);
     return false;
   }
 }
@@ -153,7 +163,14 @@ function ensureDirectories() {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch (err) {
+      console.error(`[Storage Error] Upload directory is not writable: ${dir}`, err);
+      throw new Error(`Upload directory is not writable: ${dir}`);
+    }
   }
+  console.log(`[Storage] Verified writable directories under ${STORAGE_DIR}`);
 }
 
 function loadDatabase(): DatabaseState {
@@ -903,6 +920,31 @@ async function startServer() {
   const db = seedMetadataFast(loadDatabase());
 
   const app = express();
+
+  // CORS + preflight headers so cross-origin frontend deploys can authenticate and upload cleanly
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Authorization, Content-Type, Range, X-Unique-Upload-Id'
+    );
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Range, X-Download-Quality');
+    res.setHeader('Access-Control-Max-Age', '86400');
+
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -940,6 +982,32 @@ async function startServer() {
   });
 
   // Serve public assets (favicon / app icon) and uploaded/seeded media with browser caching
+  const DOWNLOADS_DIRS = [path.join(PUBLIC_DIR, 'downloads'), path.join(STORAGE_DIR, 'downloads')];
+  app.get('/downloads/:filename', (req, res, next) => {
+    const safeName = path.basename(req.params.filename || '');
+    if (!safeName) {
+      next();
+      return;
+    }
+    for (const dir of DOWNLOADS_DIRS) {
+      const filePath = path.join(dir, safeName);
+      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        if (safeName.toLowerCase().endsWith('.apk')) {
+          res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+          res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+          res.setHeader('Cache-Control', 'public, max-age=3600');
+        }
+        res.sendFile(filePath);
+        return;
+      }
+    }
+    if (safeName.toLowerCase().endsWith('.apk')) {
+      res.status(404).json({ error: 'Android APK package is not uploaded yet.' });
+      return;
+    }
+    next();
+  });
+
   if (fs.existsSync(PUBLIC_DIR)) {
     app.use(express.static(PUBLIC_DIR, { maxAge: '1d', etag: true, lastModified: true }));
   }
@@ -947,9 +1015,10 @@ async function startServer() {
   app.use('/storage/movies', express.static(MOVIES_DIR, { maxAge: '1d', etag: true, lastModified: true }));
 
   const server = http.createServer(app);
-  // Prevent socket/request timeouts during large 2 GB movie uploads
+  // Prevent socket/request timeouts & proxy 502 races during large 2 GB movie uploads
   server.requestTimeout = 0;
   server.headersTimeout = 120_000;
+  server.keepAliveTimeout = 65_000;
   const wss = new WebSocketServer({ noServer: true });
   const liveWss = new WebSocketServer({ noServer: true });
 
@@ -970,16 +1039,20 @@ async function startServer() {
     }
   });
 
+  attachFootballServer(app, server, STORAGE_DIR);
+
   interface ConnectedClient {
     ws: WebSocket;
     userId: string;
     username: string;
     room: ChatRoomId;
     partyCode?: string;
+    chessRoomCode?: string;
   }
 
   const clients = new Map<WebSocket, ConnectedClient>();
   const watchParties = new Map<string, WatchPartyState>();
+  const chessRooms = new Map<string, ChessRoomState>();
 
   function sendToParty(roomCode: string, event: ServerWsEvent) {
     const payload = JSON.stringify(event);
@@ -1010,6 +1083,70 @@ async function startServer() {
       party.hostName = party.participants[0].username;
     }
     sendToParty(code, { type: 'party:state', party });
+  }
+
+  function getPublicChessRooms(): ChessRoomSummary[] {
+    const list: ChessRoomSummary[] = [];
+    for (const room of chessRooms.values()) {
+      if (room.players.length > 0 && room.players.length < 2 && room.status === 'waiting') {
+        list.push({
+          roomCode: room.roomCode,
+          hostName: room.hostName,
+          playersCount: room.players.length,
+          status: room.status,
+          createdAt: room.updatedAt,
+        });
+      }
+    }
+    return list.sort((a, b) => b.createdAt - a.createdAt).slice(0, 20);
+  }
+
+  function broadcastChessRooms() {
+    broadcast({ type: 'chess:rooms', rooms: getPublicChessRooms() });
+  }
+
+  function sendToChessRoom(roomCode: string, event: ServerWsEvent) {
+    const payload = JSON.stringify(event);
+    for (const [socket, client] of clients.entries()) {
+      if (client.chessRoomCode === roomCode && socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      }
+    }
+  }
+
+  function removeClientFromChessRoom(client: ConnectedClient, targetCode?: string) {
+    const code = targetCode || client.chessRoomCode;
+    if (!code) return;
+    const room = chessRooms.get(code);
+    if (client.chessRoomCode === code) {
+      client.chessRoomCode = undefined;
+    }
+    if (!room) return;
+
+    const leaving = room.players.find((p) => p.userId === client.userId);
+    room.players = room.players.filter((p) => p.userId !== client.userId);
+
+    if (room.players.length === 0) {
+      chessRooms.delete(code);
+      broadcastChessRooms();
+      return;
+    }
+
+    if (room.status === 'playing' && leaving) {
+      room.status = 'finished';
+      room.resignedBy = leaving.color;
+      room.winner = leaving.color === 'w' ? 'b' : 'w';
+    } else if (room.status !== 'playing') {
+      room.status = 'waiting';
+    }
+
+    if (room.hostUserId === client.userId) {
+      room.hostUserId = room.players[0].userId;
+      room.hostName = room.players[0].username;
+    }
+    room.updatedAt = Date.now();
+    sendToChessRoom(code, { type: 'chess:state', room });
+    broadcastChessRooms();
   }
 
   function getOnlineUsers(): OnlineUser[] {
@@ -1061,6 +1198,7 @@ async function startServer() {
             onlineUsers: getOnlineUsers(),
           };
           ws.send(JSON.stringify(initPayload));
+          ws.send(JSON.stringify({ type: 'chess:rooms', rooms: getPublicChessRooms() }));
           broadcast({ type: 'presence:update', onlineUsers: getOnlineUsers() });
         } else if (data.type === 'user:rename') {
           const nextName = String(data.username || '').trim().slice(0, 32);
@@ -1077,6 +1215,19 @@ async function startServer() {
                   party.hostName = nextName;
                 }
                 sendToParty(client.partyCode, { type: 'party:state', party });
+              }
+            }
+            if (client.chessRoomCode) {
+              const chessRoom = chessRooms.get(client.chessRoomCode);
+              if (chessRoom) {
+                chessRoom.players = chessRoom.players.map((p) =>
+                  p.userId === client.userId ? { ...p, username: nextName } : p
+                );
+                if (chessRoom.hostUserId === client.userId) {
+                  chessRoom.hostName = nextName;
+                }
+                sendToChessRoom(client.chessRoomCode, { type: 'chess:state', room: chessRoom });
+                broadcastChessRooms();
               }
             }
           }
@@ -1202,6 +1353,159 @@ async function startServer() {
           party.updatedAt = Date.now();
 
           sendToParty(roomCode, { type: 'party:state', party });
+        } else if (data.type === 'chess:list') {
+          ws.send(JSON.stringify({ type: 'chess:rooms', rooms: getPublicChessRooms() }));
+        } else if (data.type === 'chess:create') {
+          const actorId = (client.userId || String(data.userId || randomUUID())).slice(0, 64);
+          const actorName =
+            String(data.username || client.username || 'MovieFan').trim().slice(0, 32) || 'MovieFan';
+          client.userId = actorId;
+          client.username = actorName;
+
+          if (client.chessRoomCode) {
+            removeClientFromChessRoom(client, client.chessRoomCode);
+          }
+
+          let code = '';
+          for (let attempt = 0; attempt < 8; attempt++) {
+            const candidate = Math.random().toString(36).slice(2, 8).toUpperCase();
+            if (!chessRooms.has(candidate)) {
+              code = candidate;
+              break;
+            }
+          }
+          if (!code) code = randomUUID().slice(0, 6).toUpperCase();
+
+          const hostColor: 'w' | 'b' =
+            data.preferredColor === 'b'
+              ? 'b'
+              : data.preferredColor === 'random'
+              ? Math.random() < 0.5
+                ? 'w'
+                : 'b'
+              : 'w';
+
+          const room: ChessRoomState = {
+            roomCode: code,
+            hostUserId: actorId,
+            hostName: actorName,
+            players: [{ userId: actorId, username: actorName, color: hostColor }],
+            moves: [],
+            turn: 'w',
+            status: 'waiting',
+            resignedBy: null,
+            winner: null,
+            updatedAt: Date.now(),
+          };
+          chessRooms.set(code, room);
+          client.chessRoomCode = code;
+          sendToChessRoom(code, { type: 'chess:state', room });
+          broadcastChessRooms();
+        } else if (data.type === 'chess:join') {
+          const roomCode = String(data.roomCode || '')
+            .trim()
+            .toUpperCase()
+            .replace(/[^A-Z0-9_-]/g, '')
+            .slice(0, 12);
+          const room = chessRooms.get(roomCode);
+          if (!room) {
+            ws.send(JSON.stringify({ type: 'chess:error', message: `Chess room "${roomCode}" not found.` }));
+            return;
+          }
+
+          const actorId = (client.userId || String(data.userId || randomUUID())).slice(0, 64);
+          const actorName =
+            String(data.username || client.username || 'MovieFan').trim().slice(0, 32) || 'MovieFan';
+          client.userId = actorId;
+          client.username = actorName;
+
+          const existingPlayer = room.players.find((p) => p.userId === actorId);
+          if (!existingPlayer && room.players.length >= 2) {
+            ws.send(JSON.stringify({ type: 'chess:error', message: 'This chess room already has 2 players.' }));
+            return;
+          }
+
+          if (client.chessRoomCode && client.chessRoomCode !== roomCode) {
+            removeClientFromChessRoom(client, client.chessRoomCode);
+          }
+          client.chessRoomCode = roomCode;
+
+          if (!existingPlayer) {
+            const takenColor = room.players[0]?.color || 'w';
+            const guestColor: 'w' | 'b' = takenColor === 'w' ? 'b' : 'w';
+            room.players.push({ userId: actorId, username: actorName, color: guestColor });
+            if (room.status === 'waiting') {
+              room.status = 'playing';
+            }
+          } else {
+            existingPlayer.username = actorName;
+          }
+          room.updatedAt = Date.now();
+          sendToChessRoom(roomCode, { type: 'chess:state', room });
+          broadcastChessRooms();
+        } else if (data.type === 'chess:move') {
+          const roomCode = String(data.roomCode || client.chessRoomCode || '')
+            .trim()
+            .toUpperCase()
+            .slice(0, 12);
+          const room = chessRooms.get(roomCode);
+          if (!room || room.status !== 'playing') return;
+
+          const actorId = client.userId || String(data.userId || '');
+          const player = room.players.find((p) => p.userId === actorId);
+          if (!player) return;
+
+          const mv = data.move as ChessRoomMovePayload;
+          if (!mv || player.color !== room.turn || mv.byColor !== room.turn) return;
+          if (mv.ply !== room.moves.length + 1) return;
+
+          room.moves.push(mv);
+          room.turn = room.turn === 'w' ? 'b' : 'w';
+          room.updatedAt = Date.now();
+          sendToChessRoom(roomCode, { type: 'chess:state', room });
+        } else if (data.type === 'chess:resign') {
+          const roomCode = String(data.roomCode || client.chessRoomCode || '')
+            .trim()
+            .toUpperCase()
+            .slice(0, 12);
+          const room = chessRooms.get(roomCode);
+          if (!room || room.status !== 'playing') return;
+
+          const actorId = client.userId || String(data.userId || '');
+          const player = room.players.find((p) => p.userId === actorId);
+          if (!player) return;
+
+          room.status = 'finished';
+          room.resignedBy = player.color;
+          room.winner = player.color === 'w' ? 'b' : 'w';
+          room.updatedAt = Date.now();
+          sendToChessRoom(roomCode, { type: 'chess:state', room });
+        } else if (data.type === 'chess:rematch') {
+          const roomCode = String(data.roomCode || client.chessRoomCode || '')
+            .trim()
+            .toUpperCase()
+            .slice(0, 12);
+          const room = chessRooms.get(roomCode);
+          if (!room) return;
+
+          room.players = room.players.map((p) => ({
+            ...p,
+            color: p.color === 'w' ? 'b' : 'w',
+          }));
+          room.moves = [];
+          room.turn = 'w';
+          room.resignedBy = null;
+          room.winner = null;
+          room.status = room.players.length >= 2 ? 'playing' : 'waiting';
+          room.updatedAt = Date.now();
+          sendToChessRoom(roomCode, { type: 'chess:state', room });
+        } else if (data.type === 'chess:leave') {
+          const roomCode = String(data.roomCode || client.chessRoomCode || '')
+            .trim()
+            .toUpperCase()
+            .slice(0, 12);
+          removeClientFromChessRoom(client, roomCode);
+          ws.send(JSON.stringify({ type: 'chess:left', roomCode }));
         }
       } catch (err) {
         console.error('WebSocket message error:', err);
@@ -1212,6 +1516,7 @@ async function startServer() {
       const client = clients.get(ws);
       if (client) {
         removeClientFromParty(client);
+        removeClientFromChessRoom(client);
       }
       clients.delete(ws);
       broadcast({ type: 'presence:update', onlineUsers: getOnlineUsers() });
@@ -1219,13 +1524,15 @@ async function startServer() {
   });
 
   const MAX_MOVIE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
-  const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov)$/i;
+  const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov|m4v)$/i;
   const ALLOWED_VIDEO_MIMES = new Set([
     'video/mp4',
     'video/webm',
     'video/x-matroska',
     'video/matroska',
     'video/quicktime',
+    'video/3gpp',
+    'video/x-m4v',
   ]);
   const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp)$/i;
   const ALLOWED_POSTER_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
@@ -1233,7 +1540,7 @@ async function startServer() {
   function isValidVideoUpload(fileName: string, mimeType: string): boolean {
     const mime = (mimeType || '').toLowerCase();
     if (mime.startsWith('image/')) return false;
-    return ALLOWED_VIDEO_MIMES.has(mime) || ALLOWED_VIDEO_EXTS.test(fileName || '');
+    return mime.startsWith('video/') || ALLOWED_VIDEO_MIMES.has(mime) || ALLOWED_VIDEO_EXTS.test(fileName || '');
   }
 
   function sanitizeHttpUrl(raw: unknown): string | undefined {
@@ -1301,7 +1608,7 @@ async function startServer() {
         cb(null, dir);
       },
       filename: (req, _file, cb) => {
-        const idx = Math.max(0, Number(req.body?.chunkIndex ?? req.query?.chunkIndex ?? 0) || 0);
+        const idx = Math.max(0, Number(req.query?.chunkIndex ?? req.body?.chunkIndex ?? 0) || 0);
         cb(null, `part-${String(idx).padStart(6, '0')}`);
       },
     }),
@@ -1322,6 +1629,73 @@ async function startServer() {
   }
 
   const pendingChunkUploads = new Map<string, PendingChunkUpload>();
+
+  function getChunkSessionPath(uploadId: string): string {
+    return path.join(CHUNKS_DIR, uploadId, 'session.json');
+  }
+
+  function saveChunkSession(session: PendingChunkUpload): void {
+    pendingChunkUploads.set(session.uploadId, session);
+    const dir = path.join(CHUNKS_DIR, session.uploadId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(getChunkSessionPath(session.uploadId), JSON.stringify(session), 'utf-8');
+  }
+
+  function loadChunkSession(rawUploadId: string): PendingChunkUpload | null {
+    const uploadId = sanitizeFilename(rawUploadId).slice(0, 64);
+    if (!uploadId) return null;
+    const inMemory = pendingChunkUploads.get(uploadId);
+    if (inMemory) return inMemory;
+    const sessionPath = getChunkSessionPath(uploadId);
+    if (!fs.existsSync(sessionPath)) return null;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as PendingChunkUpload;
+      if (parsed?.uploadId) {
+        pendingChunkUploads.set(uploadId, parsed);
+        return parsed;
+      }
+    } catch (err) {
+      console.error(`[Upload] Failed reading chunk session ${uploadId}:`, err);
+    }
+    return null;
+  }
+
+  function appendChunkFileToStream(
+    partPath: string,
+    outStream: fs.WriteStream
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const readStream = fs.createReadStream(partPath);
+      let settled = false;
+
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        readStream.destroy();
+        reject(err);
+      };
+
+      readStream.on('error', (err) => fail(err));
+      outStream.once('error', (err) => fail(err));
+
+      readStream.on('data', (chunk) => {
+        if (!outStream.write(chunk)) {
+          readStream.pause();
+          outStream.once('drain', () => {
+            if (!settled) readStream.resume();
+          });
+        }
+      });
+
+      readStream.on('end', () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      });
+    });
+  }
 
   async function finalizeUploadedMovie(params: {
     videoFilePath: string;
@@ -1398,10 +1772,12 @@ async function startServer() {
 
     const country = String(body.country || '').trim().slice(0, 60) || undefined;
     const rawCategory = String(body.category || '').trim();
+    const normalizedCategory = rawCategory === 'Movie' ? 'Movies' : rawCategory;
     const validCategories = ['Movies', 'Series', 'Music', 'Anime', 'Nollywood', 'K-Drama'];
-    const category = validCategories.includes(rawCategory)
-      ? (rawCategory as Movie['category'])
+    const category = validCategories.includes(normalizedCategory)
+      ? (normalizedCategory as Movie['category'])
       : undefined;
+    const ageRating = String(body.ageRating || '').trim().slice(0, 12) || undefined;
     const trailerUrl = sanitizeHttpUrl(body.trailerUrl);
 
     const movie: Movie = {
@@ -1410,6 +1786,7 @@ async function startServer() {
       genre,
       ...(category ? { category } : {}),
       ...(country ? { country } : {}),
+      ...(ageRating ? { ageRating } : {}),
       year,
       duration,
       quality,
@@ -1461,11 +1838,13 @@ async function startServer() {
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     const verifiedUser = await verifyFirebaseIdToken(req.headers.authorization);
     if (!verifiedUser) {
-      res.status(401).json({ error: 'Administrator authentication is required.' });
+      console.warn(`[Upload Auth] Unauthorized ${req.method} ${req.originalUrl}: missing or invalid Bearer token.`);
+      res.status(401).json({ error: 'Administrator sign-in expired or missing. Please log in again and retry.' });
       return;
     }
     const admin = await isAdminUser(verifiedUser);
     if (!admin) {
+      console.warn(`[Upload Auth] Forbidden ${req.method} ${req.originalUrl} for ${verifiedUser.email || verifiedUser.uid}`);
       res.status(403).json({
         error: 'Only the administrator can upload, edit, or remove movies.',
       });
@@ -1474,6 +1853,25 @@ async function startServer() {
     res.locals.verifiedUser = verifiedUser;
     next();
   };
+
+  app.get('/api/upload/health', requireAdmin, (_req, res) => {
+    try {
+      ensureDirectories();
+      res.json({
+        ok: true,
+        storageWritable: true,
+        maxVideoBytes: MAX_MOVIE_UPLOAD_BYTES,
+        chunkSupported: true,
+      });
+    } catch (err) {
+      console.error('[Upload Health] Storage check failed:', err);
+      res.status(500).json({
+        ok: false,
+        storageWritable: false,
+        error: err instanceof Error ? err.message : 'Upload storage is unavailable.',
+      });
+    }
+  });
 
   app.get('/api/movies', (_req, res) => {
     res.json({ movies: db.movies });
@@ -1494,6 +1892,7 @@ async function startServer() {
         const posterFile = files?.poster?.[0];
 
         if (!videoFile) {
+          console.warn('[Upload] Direct POST /api/movies missing video file field');
           if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
           res.status(400).json({ error: 'Please choose a video file to upload.' });
           return;
@@ -1507,6 +1906,10 @@ async function startServer() {
           return;
         }
 
+        console.log(
+          `[Upload] Direct upload "${title}" (${videoFile.originalname}, ${videoFile.size} bytes, ${videoFile.mimetype}) by ${verifiedUser?.email || verifiedUser?.uid || 'admin'}`
+        );
+
         const movie = await finalizeUploadedMovie({
           videoFilePath: videoFile.path,
           videoUrlFilename: videoFile.filename,
@@ -1518,6 +1921,7 @@ async function startServer() {
           verifiedUser,
         });
 
+        console.log(`[Upload] Published direct movie "${movie.title}" (id=${movie.id})`);
         res.status(201).json({ movie });
       } catch (err) {
         console.error('[Upload Error] Direct POST /api/movies failed:', err);
@@ -1528,9 +1932,10 @@ async function startServer() {
     }
   );
 
-  // Chunked upload pipeline (bypasses Cloud Run 32 MB single-request limit up to 2 GB)
+  // Chunked upload pipeline (bypasses strict proxy/Cloud Run body limits up to 2 GB)
   app.post('/api/movies/chunked/init', requireAdmin, (req, res) => {
     try {
+      ensureDirectories();
       const verifiedUser = res.locals.verifiedUser as VerifiedFirebaseUser | undefined;
       const fileName = String(req.body?.fileName || '').trim();
       const mimeType = String(req.body?.mimeType || '').trim();
@@ -1538,7 +1943,7 @@ async function startServer() {
       const totalChunks = Number(req.body?.totalChunks || 0);
 
       if (!fileName || !isValidVideoUpload(fileName, mimeType)) {
-        res.status(400).json({ error: 'Please choose a video file (MP4, WEBM, MKV, or MOV).' });
+        res.status(400).json({ error: 'Please choose a video file (MP4, WEBM, MKV, MOV, or M4V).' });
         return;
       }
       if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) {
@@ -1549,7 +1954,7 @@ async function startServer() {
         res.status(413).json({ error: 'Video file exceeds the 2 GB upload limit.' });
         return;
       }
-      if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > 1024) {
+      if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > 4096) {
         res.status(400).json({ error: 'Invalid upload chunk configuration.' });
         return;
       }
@@ -1558,7 +1963,7 @@ async function startServer() {
       const uploadDir = path.join(CHUNKS_DIR, uploadId);
       fs.mkdirSync(uploadDir, { recursive: true });
 
-      pendingChunkUploads.set(uploadId, {
+      saveChunkSession({
         uploadId,
         fileName,
         fileSizeBytes,
@@ -1568,10 +1973,15 @@ async function startServer() {
         createdAt: Date.now(),
       });
 
+      console.log(
+        `[Upload] Chunked session started (${uploadId}): "${fileName}", ${fileSizeBytes} bytes in ${totalChunks} chunks`
+      );
       res.status(201).json({ uploadId });
     } catch (err) {
       console.error('[Upload Error] Chunked init failed:', err);
-      res.status(500).json({ error: 'Could not initialize upload session.' });
+      res.status(500).json({
+        error: err instanceof Error ? `Could not initialize upload session: ${err.message}` : 'Could not initialize upload session.',
+      });
     }
   });
 
@@ -1580,20 +1990,26 @@ async function startServer() {
     requireAdmin,
     chunkUpload.single('chunk'),
     (req, res) => {
-      const uploadId = String(req.params.uploadId || '').trim();
-      const session = pendingChunkUploads.get(uploadId);
+      const uploadId = sanitizeFilename(String(req.params.uploadId || '').trim()).slice(0, 64);
+      const session = loadChunkSession(uploadId);
       if (!session) {
+        console.warn(`[Upload] Chunk part rejected — unknown session ${uploadId}`);
         res.status(404).json({ error: 'Upload session not found or expired. Please retry upload.' });
         return;
       }
       const chunkIndex = Number(req.body?.chunkIndex ?? req.query?.chunkIndex ?? -1);
       if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
-        res.status(400).json({ error: 'Invalid chunk index.' });
+        res.status(400).json({ error: `Invalid chunk index (${chunkIndex}).` });
         return;
       }
       if (!req.file) {
         res.status(400).json({ error: 'Chunk binary payload is missing.' });
         return;
+      }
+      if (chunkIndex === 0 || chunkIndex + 1 === session.totalChunks || (chunkIndex + 1) % 10 === 0) {
+        console.log(
+          `[Upload] Chunk ${chunkIndex + 1}/${session.totalChunks} stored for ${uploadId} (${req.file.size} bytes)`
+        );
       }
       res.json({ received: true, chunkIndex });
     }
@@ -1605,7 +2021,7 @@ async function startServer() {
     upload.fields([{ name: 'poster', maxCount: 1 }]),
     async (req, res) => {
       const uploadId = sanitizeFilename(String(req.params.uploadId || '').trim()).slice(0, 64);
-      const session = pendingChunkUploads.get(uploadId);
+      const session = loadChunkSession(uploadId);
       const uploadDir = path.join(CHUNKS_DIR, uploadId);
       const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
       const posterFile = files?.poster?.[0];
@@ -1618,6 +2034,7 @@ async function startServer() {
       };
 
       if (!session) {
+        console.warn(`[Upload] Complete failed — missing session ${uploadId}`);
         if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
         cleanupSession();
         res.status(404).json({ error: 'Upload session expired before completion. Please try again.' });
@@ -1641,6 +2058,7 @@ async function startServer() {
         for (let i = 0; i < session.totalChunks; i += 1) {
           const partPath = path.join(uploadDir, `part-${String(i).padStart(6, '0')}`);
           if (!fs.existsSync(partPath)) {
+            console.warn(`[Upload] Missing part ${i + 1}/${session.totalChunks} in session ${uploadId}`);
             if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
             cleanupSession();
             res.status(400).json({ error: `Missing upload chunk ${i + 1} of ${session.totalChunks}. Please retry.` });
@@ -1648,19 +2066,16 @@ async function startServer() {
           }
         }
 
+        console.log(`[Upload] Merging ${session.totalChunks} chunks for "${title}" (${uploadId})...`);
         const outStream = fs.createWriteStream(finalFilePath);
         for (let i = 0; i < session.totalChunks; i += 1) {
           const partPath = path.join(uploadDir, `part-${String(i).padStart(6, '0')}`);
-          await new Promise<void>((resolve, reject) => {
-            const readStream = fs.createReadStream(partPath);
-            readStream.on('error', reject);
-            readStream.on('end', resolve);
-            readStream.pipe(outStream, { end: false });
-          });
+          await appendChunkFileToStream(partPath, outStream);
         }
         await new Promise<void>((resolve, reject) => {
-          outStream.on('error', reject);
-          outStream.end(() => resolve());
+          outStream.once('error', reject);
+          outStream.once('finish', resolve);
+          outStream.end();
         });
 
         const verifiedUser = res.locals.verifiedUser as VerifiedFirebaseUser | undefined;
@@ -1677,9 +2092,10 @@ async function startServer() {
         });
 
         cleanupSession();
+        console.log(`[Upload] Completed & published "${movie.title}" (id=${movie.id}, ${statSize} bytes)`);
         res.status(201).json({ movie });
       } catch (err) {
-        console.error('[Upload Error] Chunked complete failed:', err);
+        console.error(`[Upload Error] Chunked complete failed for ${uploadId}:`, err);
         if (fs.existsSync(finalFilePath)) fs.unlinkSync(finalFilePath);
         if (posterFile && fs.existsSync(posterFile.path)) fs.unlinkSync(posterFile.path);
         cleanupSession();
@@ -1692,12 +2108,129 @@ async function startServer() {
 
   app.post('/api/movies/chunked/:uploadId/abort', requireAdmin, (req, res) => {
     const uploadId = sanitizeFilename(String(req.params.uploadId || '').trim()).slice(0, 64);
+    console.log(`[Upload] Aborted chunked session ${uploadId}`);
     pendingChunkUploads.delete(uploadId);
     const uploadDir = path.join(CHUNKS_DIR, uploadId);
     if (fs.existsSync(uploadDir)) {
       fs.rmSync(uploadDir, { recursive: true, force: true });
     }
     res.json({ aborted: true });
+  });
+
+  // Save externally hosted (Cloudinary) uploaded movie into persistent server catalog
+  app.post('/api/movies/cloudinary', requireAdmin, (req, res) => {
+    try {
+      const verifiedUser = res.locals.verifiedUser as VerifiedFirebaseUser | undefined;
+      const body = req.body as Record<string, unknown>;
+      const title = String(body.title || '').trim().slice(0, 140);
+      const videoUrl = sanitizeHttpUrl(body.videoUrl);
+      const posterUrl = sanitizeHttpUrl(body.posterUrl) || '/storage/posters/midnight_meridian_poster.jpg';
+
+      if (!title) {
+        res.status(400).json({ error: 'Movie title is required.' });
+        return;
+      }
+      if (!videoUrl) {
+        res.status(400).json({ error: 'A valid Cloudinary video URL is required.' });
+        return;
+      }
+
+      const rawGenre = String(body.genre || 'Action') as MovieGenre;
+      const genre: MovieGenre = VALID_GENRES.includes(rawGenre) ? rawGenre : 'Action';
+      const rawQuality = String(body.quality || '1080p HD') as MovieQuality;
+      const quality: MovieQuality = VALID_QUALITIES.includes(rawQuality) ? rawQuality : '1080p HD';
+      const rawCategory = String(body.category || '').trim();
+      const normalizedCategory = rawCategory === 'Movie' ? 'Movies' : rawCategory;
+      const validCategories = ['Movies', 'Series', 'Music', 'Anime', 'Nollywood', 'K-Drama'];
+      const category = validCategories.includes(normalizedCategory)
+        ? (normalizedCategory as Movie['category'])
+        : 'Movies';
+      const year = Math.min(2035, Math.max(1900, Number(body.year) || new Date().getFullYear()));
+      const duration = String(body.duration || '1h 45m').trim() || '1h 45m';
+      const uploader =
+        verifiedUser?.displayName ||
+        String(body.uploader || 'TempleSolo Admin').trim() ||
+        'TempleSolo Admin';
+      const synopsis =
+        String(body.synopsis || '').trim().slice(0, 1000) ||
+        `${title} (${year}) — uploaded to Temple Cinema vault.`;
+      const ageRating = String(body.ageRating || '16+').trim().slice(0, 12) || '16+';
+      const trailerUrl = sanitizeHttpUrl(body.trailerUrl);
+      const fileSizeBytes = Math.max(0, Number(body.fileSizeBytes) || 0);
+
+      const movie: Movie = {
+        id:
+          typeof body.id === 'string' && body.id.trim()
+            ? sanitizeFilename(body.id.trim()).slice(0, 64)
+            : `movie-cld-${randomUUID().slice(0, 8)}`,
+        title,
+        genre,
+        category,
+        year,
+        duration,
+        quality,
+        director: String(body.director || uploader).trim() || uploader,
+        uploader,
+        synopsis,
+        imdbRating: Number.isFinite(Number(body.imdbRating))
+          ? Math.round(Math.min(10, Math.max(1, Number(body.imdbRating))) * 10) / 10
+          : 8.2,
+        ageRating,
+        posterUrl,
+        backdropUrl: posterUrl,
+        ...(trailerUrl ? { trailerUrl } : {}),
+        videoUrl,
+        fileName: String(body.fileName || `${title}.mp4`).trim(),
+        fileSizeBytes,
+        mimeType: String(body.mimeType || 'video/mp4').trim(),
+        downloads: 0,
+        featured: false,
+        isSeeded: false,
+        ownerUid: verifiedUser?.uid,
+        cloudinaryPublicId: typeof body.cloudinaryPublicId === 'string' ? body.cloudinaryPublicId : undefined,
+        posterPublicId: typeof body.posterPublicId === 'string' ? body.posterPublicId : undefined,
+        videoPublicId: typeof body.videoPublicId === 'string' ? body.videoPublicId : undefined,
+        cloudinaryUploaded: true,
+        createdAt: new Date().toISOString(),
+      };
+
+      const existingIdx = db.movies.findIndex((m) => m.id === movie.id);
+      if (existingIdx !== -1) {
+        db.movies[existingIdx] = movie;
+      } else {
+        db.movies.unshift(movie);
+      }
+
+      const dropMessage: ChatMessage = {
+        id: `drop-${movie.id}`,
+        room: 'drops',
+        userId: verifiedUser?.uid || 'system-drops',
+        username: uploader,
+        text: `Uploaded "${movie.title}" (${movie.quality}) to the vault.`,
+        timestamp: new Date().toISOString(),
+        isSystem: true,
+        movieRef: {
+          id: movie.id,
+          title: movie.title,
+          genre: movie.genre,
+          year: movie.year,
+          quality: movie.quality,
+          posterUrl: movie.posterUrl,
+        },
+      };
+      if (!db.messages.some((m) => m.id === dropMessage.id)) {
+        db.messages.push(dropMessage);
+      }
+      saveDatabase(db);
+
+      broadcast({ type: 'movie:created', movie });
+      broadcast({ type: 'chat:message', message: dropMessage });
+
+      res.status(201).json({ movie });
+    } catch (err) {
+      console.error('[Upload Error] POST /api/movies/cloudinary failed:', err);
+      res.status(500).json({ error: 'Failed to save Cloudinary movie metadata.' });
+    }
   });
 
   // Update movie metadata (admin content management only)
@@ -2893,9 +3426,15 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
       if (err.code === 'LIMIT_FILE_SIZE') {
         status = 413;
         message = 'File is too large for this endpoint (max 2 GB for videos).';
-      } else if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      } else if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_PART_COUNT' || err.code === 'LIMIT_FIELD_COUNT') {
         status = 400;
-        message = 'Unexpected upload field submitted.';
+        message = 'Unexpected or malformed multipart upload form fields.';
+      } else if (err.code === 'EACCES' || err.code === 'EROFS') {
+        status = 500;
+        message = 'Upload storage directory is not writable (permission denied).';
+      } else if (err.code === 'ENOSPC') {
+        status = 507;
+        message = 'Server storage disk is full. Free space before uploading.';
       } else if (err.name === 'MulterError') {
         status = 400;
       } else if (err instanceof SyntaxError && 'body' in err) {

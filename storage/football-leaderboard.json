@@ -1,0 +1,48 @@
+{
+  "profiles": {
+    "seed-temple-legend": {
+      "playerId": "seed-temple-legend",
+      "name": "Solo Striker",
+      "avatarId": "crown-gold",
+      "wins": 14,
+      "losses": 3,
+      "goals": 58,
+      "saves": 24,
+      "bestFreeKickScore": 685,
+      "updatedAt": "2026-11-18T11:54:12.197Z"
+    },
+    "seed-golden-glove": {
+      "playerId": "seed-golden-glove",
+      "name": "Kofi Keeper",
+      "avatarId": "titan-keeper",
+      "wins": 11,
+      "losses": 5,
+      "goals": 39,
+      "saves": 41,
+      "bestFreeKickScore": 540,
+      "updatedAt": "2026-11-18T11:54:12.198Z"
+    },
+    "seed-curler-9": {
+      "playerId": "seed-curler-9",
+      "name": "Amara Curve",
+      "avatarId": "lion-crest",
+      "wins": 9,
+      "losses": 4,
+      "goals": 44,
+      "saves": 19,
+      "bestFreeKickScore": 620,
+      "updatedAt": "2026-11-18T11:54:12.198Z"
+    },
+    "smoke-1": {
+      "playerId": "smoke-1",
+      "name": "TempleTester",
+      "avatarId": "temple-crown",
+      "wins": 0,
+      "losses": 0,
+      "goals": 0,
+      "saves": 0,
+      "bestFreeKickScore": 0,
+      "updatedAt": "2026-11-18T11:54:16.712Z"
+    }
+  }
+}

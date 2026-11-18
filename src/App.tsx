@@ -8,10 +8,13 @@ import { useUpcomingNotifications } from './hooks/useUpcomingNotifications';
 import { useWatchProgress } from './hooks/useWatchProgress';
 import { isCellularConnection, useAppSettings } from './hooks/useAppSettings';
 import { useDownloadManager } from './hooks/useDownloadManager';
+import { usePWAInstall } from './hooks/usePWAInstall';
 import {
   WHATSAPP_CHANNEL_URL,
   type ChatMessage,
   type ChatRoomId,
+  type ChessRoomState,
+  type ChessRoomSummary,
   type ClientWsEvent,
   type DownloadQualityTier,
   type HomeCategoryChip,
@@ -25,6 +28,11 @@ import {
   type WatchPartyState,
 } from './types/cinema';
 import { enrichMovie } from './utils/movieMetadata';
+import {
+  buildAndSaveOfflineSearchIndex,
+  hydrateMoviesFromOfflineIndex,
+  type SearchSortOrder,
+} from './utils/offlineSearchIndex';
 import { Header, type AppMainView } from './components/Header';
 import { HeroSpotlight } from './components/HeroSpotlight';
 import { CategoryChipsBar, filterMoviesByCategory } from './components/CategoryChipsBar';
@@ -35,8 +43,8 @@ import { BottomNavBar, type MobileNavTab } from './components/BottomNavBar';
 import { TrendingNow } from './components/TrendingNow';
 import { ComingSoon } from './components/ComingSoon';
 import { MovieGrid, type CollectionFilter } from './components/MovieGrid';
+import { SearchPage } from './components/SearchPage';
 import { DownloadsManagerPanel } from './components/DownloadsManagerPanel';
-import { BecauseYouWatchedRow } from './components/BecauseYouWatchedRow';
 import { CommunityChat } from './components/CommunityChat';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { TempleLogoIcon } from './components/TempleLogo';
@@ -81,6 +89,9 @@ const CinemaStage3D = lazy(() =>
 );
 const CinemaLocationsMap = lazy(() =>
   import('./components/CinemaLocationsMap').then((m) => ({ default: m.CinemaLocationsMap }))
+);
+const GamesHub = lazy(() =>
+  import('./components/GamesHub').then((m) => ({ default: m.GamesHub }))
 );
 
 const MOVIES_CACHE_KEY = 'tsm_cached_movies_v1';
@@ -191,11 +202,15 @@ function loadCachedMovies(): Movie[] {
   if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(MOVIES_CACHE_KEY);
-    const base = raw ? ((JSON.parse(raw) as unknown) as Movie[]) : [];
+    const parsed = raw ? ((JSON.parse(raw) as unknown) as Movie[]) : null;
+    const base =
+      Array.isArray(parsed) && parsed.length > 0
+        ? parsed
+        : hydrateMoviesFromOfflineIndex();
     const safeBase = Array.isArray(base) ? base.map(enrichMovie) : [];
     return mergeMoviesWithLocalPersistence(safeBase);
   } catch {
-    return mergeMoviesWithLocalPersistence([]);
+    return mergeMoviesWithLocalPersistence(hydrateMoviesFromOfflineIndex().map(enrichMovie));
   }
 }
 
@@ -234,6 +249,44 @@ function getOrCreateGuestName(): string {
   const created = `Viewer${Math.floor(100 + Math.random() * 899)}`;
   localStorage.setItem(key, created);
   return created;
+}
+
+function getInitialMainView(): AppMainView {
+  if (typeof window === 'undefined') return 'home';
+  const params = new URLSearchParams(window.location.search);
+  const viewParam = params.get('view');
+  if (
+    viewParam === 'search' ||
+    viewParam === 'downloads' ||
+    viewParam === 'games' ||
+    viewParam === 'lounge'
+  ) {
+    return viewParam;
+  }
+  const pathname = window.location.pathname.replace(/\/+$/, '').toLowerCase();
+  if (pathname === '/search') return 'search';
+  if (pathname === '/downloads') return 'downloads';
+  if (pathname === '/games') return 'games';
+  if (pathname === '/lounge') return 'lounge';
+  return 'home';
+}
+
+function syncMainViewInUrl(view: AppMainView) {
+  if (typeof window === 'undefined') return;
+  try {
+    const url = new URL(window.location.href);
+    if (view === 'home') {
+      url.searchParams.delete('view');
+      if (['/search', '/downloads', '/games', '/lounge'].includes(url.pathname.toLowerCase())) {
+        url.pathname = '/';
+      }
+    } else {
+      url.searchParams.set('view', view);
+    }
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Ignore history API errors
+  }
 }
 
 export default function App() {
@@ -304,10 +357,12 @@ export default function App() {
   const [activeRoom, setActiveRoom] = useState<ChatRoomId>('general');
   const [collectionView, setCollectionView] = useState<CollectionFilter>('all');
   const [selectedGenre, setSelectedGenre] = useState<'All' | MovieGenre>('All');
+  const [selectedQuality, setSelectedQuality] = useState<'All' | MovieQuality>('All');
   const [homeCategory, setHomeCategory] = useState<HomeCategoryChip>('All');
   const [catalogSort, setCatalogSort] = useState<'newest' | 'imdb' | 'downloads' | 'title'>('newest');
-  const [mainView, setMainView] = useState<AppMainView>('home');
-  const [mobileNavTab, setMobileNavTab] = useState<MobileNavTab>('home');
+  const [searchSort, setSearchSort] = useState<SearchSortOrder>('relevance');
+  const [mainView, setMainView] = useState<AppMainView>(() => getInitialMainView());
+  const [mobileNavTab, setMobileNavTab] = useState<MobileNavTab>(() => getInitialMainView());
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -326,6 +381,9 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isWatchPartyOpen, setIsWatchPartyOpen] = useState(false);
   const [partyState, setPartyState] = useState<WatchPartyState | null>(null);
+  const [chessRoom, setChessRoom] = useState<ChessRoomState | null>(null);
+  const [chessRooms, setChessRooms] = useState<ChessRoomSummary[]>([]);
+  const [chessError, setChessError] = useState<string | null>(null);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
   const [watchedIds, setWatchedIds] = useState<string[]>([]);
   const [pendingMovieRef, setPendingMovieRef] = useState<MovieChatReference | null>(null);
@@ -334,6 +392,21 @@ export default function App() {
     typeof navigator !== 'undefined' ? !navigator.onLine : false
   );
   const [isLowNetwork, setIsLowNetwork] = useState<boolean>(() => detectLowNetwork());
+  const { setBusyActivity } = usePWAInstall();
+
+  useEffect(() => {
+    setBusyActivity('playback', Boolean(selectedMovie || isWatchPartyOpen));
+  }, [selectedMovie, isWatchPartyOpen, setBusyActivity]);
+
+  useEffect(() => {
+    setBusyActivity('upload', Boolean(isUploadOpen || isAdminPanelOpen));
+  }, [isUploadOpen, isAdminPanelOpen, setBusyActivity]);
+
+  useEffect(() => {
+    if (movies.length > 0) {
+      buildAndSaveOfflineSearchIndex(movies);
+    }
+  }, [movies]);
 
   useEffect(() => {
     const goOnline = () => setIsOffline(false);
@@ -350,6 +423,76 @@ export default function App() {
       window.removeEventListener('offline', goOffline);
       window.removeEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
       conn?.removeEventListener?.('change', onConnChange);
+    };
+  }, []);
+
+  // Reset mobile browser zoom and any horizontal shift when the on-screen keyboard closes or orientation/viewport changes
+  useEffect(() => {
+    const VIEWPORT_CONTENT =
+      'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
+    let timers: number[] = [];
+
+    const normalizeViewportAndScroll = () => {
+      if (document.documentElement.scrollLeft !== 0) {
+        document.documentElement.scrollLeft = 0;
+      }
+      if (document.body.scrollLeft !== 0) {
+        document.body.scrollLeft = 0;
+      }
+      if (window.scrollX !== 0) {
+        window.scrollTo({ left: 0, top: window.scrollY, behavior: 'auto' });
+      }
+      const vv = window.visualViewport;
+      if (vv && vv.scale > 1.01) {
+        const meta = document.querySelector('meta[name="viewport"]');
+        if (meta) {
+          meta.setAttribute('content', `${VIEWPORT_CONTENT}, minimum-scale=1`);
+          window.requestAnimationFrame(() => {
+            meta.setAttribute('content', VIEWPORT_CONTENT);
+          });
+        }
+      }
+    };
+
+    const scheduleNormalize = () => {
+      timers.forEach((id) => window.clearTimeout(id));
+      timers = [
+        window.setTimeout(normalizeViewportAndScroll, 0),
+        window.setTimeout(normalizeViewportAndScroll, 120),
+        window.setTimeout(normalizeViewportAndScroll, 320),
+      ];
+    };
+
+    const handleFocusOut = (event: FocusEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target || !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
+        return;
+      }
+      const nextTarget = event.relatedTarget as HTMLElement | null;
+      if (nextTarget && ['INPUT', 'TEXTAREA', 'SELECT'].includes(nextTarget.tagName)) {
+        return;
+      }
+      scheduleNormalize();
+    };
+
+    const handleViewportResize = () => {
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isEditing =
+        activeEl && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
+      if (!isEditing) {
+        scheduleNormalize();
+      }
+    };
+
+    document.addEventListener('focusout', handleFocusOut, true);
+    window.addEventListener('orientationchange', scheduleNormalize);
+    window.visualViewport?.addEventListener('resize', handleViewportResize);
+
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+      document.removeEventListener('focusout', handleFocusOut, true);
+      window.removeEventListener('orientationchange', scheduleNormalize);
+      window.visualViewport?.removeEventListener('resize', handleViewportResize);
     };
   }, []);
 
@@ -372,6 +515,16 @@ export default function App() {
   const savedMovieIds = useMemo(
     () => new Set(savedMovies.map((m) => m.movieId)),
     [savedMovies]
+  );
+
+  const downloadedMovieIds = useMemo(
+    () =>
+      new Set(
+        downloadManager.tasks
+          .filter((task) => task.status === 'completed' || task.offlineAvailable)
+          .map((task) => task.movieId)
+      ),
+    [downloadManager.tasks]
   );
 
   const showNotice = useCallback((text: string) => {
@@ -663,6 +816,16 @@ export default function App() {
             setPartyState(data.party);
           } else if (data.type === 'party:error') {
             showNotice(data.message);
+          } else if (data.type === 'chess:rooms') {
+            setChessRooms(data.rooms);
+          } else if (data.type === 'chess:state') {
+            setChessRoom(data.room);
+            setChessError(null);
+          } else if (data.type === 'chess:left') {
+            setChessRoom(null);
+          } else if (data.type === 'chess:error') {
+            setChessError(data.message);
+            showNotice(data.message);
           }
         } catch {
           // Ignore malformed payloads
@@ -672,6 +835,7 @@ export default function App() {
       socket.onclose = () => {
         if (unmounted) return;
         setIsConnected(false);
+        setChessRoom(null);
         reconnectTimerRef.current = window.setTimeout(connect, 2000);
       };
     };
@@ -1065,6 +1229,10 @@ export default function App() {
 
   const handleUploadedMovie = (movie: Movie) => {
     const enriched = enrichMovie(movie);
+    if (enriched.cloudinaryUploaded) {
+      const currentCustom = loadCustomMovies();
+      saveCustomMovies([enriched, ...currentCustom.filter((m) => m.id !== enriched.id)]);
+    }
     setMovies((prev) => {
       if (prev.some((m) => m.id === enriched.id)) return prev;
       const next = [enriched, ...prev];
@@ -1167,9 +1335,20 @@ export default function App() {
     setSelectedMovie((prev) => (prev && prev.id === movieId ? null : prev));
   };
 
+  useEffect(() => {
+    const handlePopState = () => {
+      const next = getInitialMainView();
+      setMainView(next);
+      setMobileNavTab(next);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   const navigateToView = useCallback((view: AppMainView, anchorId?: string) => {
     setMainView(view);
     setMobileNavTab(view);
+    syncMainViewInUrl(view);
     if (anchorId) {
       window.setTimeout(() => {
         document.getElementById(anchorId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1184,6 +1363,7 @@ export default function App() {
     if (nextQuery.trim().length > 0) {
       setMainView('search');
       setMobileNavTab('search');
+      syncMainViewInUrl('search');
     }
   }, []);
 
@@ -1249,13 +1429,12 @@ export default function App() {
     [clearProgress, user]
   );
 
-  const latestWatchedMovie = watchHistoryList[0]?.movie || savedMoviesList[0];
   const activeDownloadsCount = downloadManager.tasks.filter(
     (task) => task.status === 'downloading' || task.status === 'paused'
   ).length;
 
   return (
-    <div className="min-h-screen bg-[#0A0A0C] text-[#FAFAFA] flex flex-col">
+    <div className="min-h-screen w-full max-w-full overflow-x-clip bg-[#0A0A0C] text-[#FAFAFA] flex flex-col">
       {mapsQuotaExceeded && (
         <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
           <span>
@@ -1315,13 +1494,13 @@ export default function App() {
       {notice && (
         <div
           role="status"
-          className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-[#E5A93B]/40 bg-[#18181B] px-4 py-2.5 text-xs font-medium text-[#FAFAFA] shadow-xl"
+          className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] lg:bottom-5 left-1/2 z-50 -translate-x-1/2 max-w-[calc(100vw-2rem)] break-words text-center rounded-lg border border-[#E5A93B]/40 bg-[#18181B] px-4 py-2.5 text-xs font-medium text-[#FAFAFA] shadow-xl"
         >
           {notice}
         </div>
       )}
 
-      <main className="flex-1 pb-20 lg:pb-6">
+      <main className="flex-1 w-full max-w-full overflow-x-clip pb-20 lg:pb-6">
         {mainView === 'home' && (
           <>
             {isLoading && movies.length === 0 ? (
@@ -1398,7 +1577,8 @@ export default function App() {
                       onSeeAllGenre={(genre) => {
                         setCollectionView('all');
                         setSelectedGenre(genre);
-                        navigateToView('search', 'catalog');
+                        setSelectedQuality('All');
+                        navigateToView('search', 'search-page');
                       }}
                     />
 
@@ -1413,8 +1593,9 @@ export default function App() {
                       onSeeAll={() => {
                         setCollectionView('all');
                         setSelectedGenre('All');
-                        setCatalogSort('newest');
-                        navigateToView('search', 'catalog');
+                        setSelectedQuality('All');
+                        setSearchSort('newest');
+                        navigateToView('search', 'search-page');
                       }}
                     />
                   </>
@@ -1450,12 +1631,47 @@ export default function App() {
                     showNotice('Removed upcoming release.');
                   }}
                 />
+
+                {/* 7. Bottom of Homepage App Install Banner */}
+                <PWAInstallButton variant="home-banner" />
               </>
             )}
           </>
         )}
 
-        {(mainView === 'search' || mainView === 'downloads') && (
+        {mainView === 'search' && (
+          <SearchPage
+            movies={movies}
+            isOffline={isOffline}
+            searchQuery={searchQuery}
+            selectedGenre={selectedGenre}
+            selectedQuality={selectedQuality}
+            sortBy={searchSort}
+            savedMovieIds={savedMovieIds}
+            downloadedMovieIds={downloadedMovieIds}
+            ratingsByMovie={ratingsByMovie}
+            reviewCountByMovie={reviewCountByMovie}
+            progressByMovie={progressByMovie}
+            onSearchChange={setSearchQuery}
+            onSelectGenre={setSelectedGenre}
+            onSelectQuality={setSelectedQuality}
+            onChangeSortBy={setSearchSort}
+            onBackHome={() => navigateToView('home', 'spotlight')}
+            onOpenDownloads={() => {
+              setCollectionView('all');
+              setSelectedGenre('All');
+              setCatalogSort('downloads');
+              navigateToView('downloads', 'catalog');
+            }}
+            onSelectMovie={(m) => handleOpenMovie(m, false)}
+            onPlayTrailer={(m) => handleOpenMovie(m, true)}
+            onDownload={handleDownloadMovie}
+            onToggleSave={handleToggleSave}
+            onShareToChat={handleShareToChat}
+          />
+        )}
+
+        {mainView === 'downloads' && (
           <div className="mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-8 pt-5 pb-10">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <button
@@ -1469,57 +1685,33 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => navigateToView('search')}
-                  className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-semibold border cursor-pointer transition-colors ${
-                    mainView === 'search'
-                      ? 'border-[#E6A93C] bg-[#E6A93C] text-[#0A0A0C]'
-                      : 'border-[#27272A] bg-[#111114] text-[#D4D4D8]'
-                  }`}
+                  onClick={() => navigateToView('search', 'search-page')}
+                  className="min-h-[44px] rounded-xl px-4 py-2 text-xs font-semibold border border-[#27272A] bg-[#111114] text-[#D4D4D8] hover:border-[#E6A93C] hover:text-[#FAFAFA] cursor-pointer transition-colors"
                 >
                   {t('navSearch')}
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setCollectionView('all');
-                    setSelectedGenre('All');
-                    setCatalogSort('downloads');
-                    navigateToView('downloads');
-                  }}
-                  className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-semibold border cursor-pointer transition-colors ${
-                    mainView === 'downloads'
-                      ? 'border-[#E6A93C] bg-[#E6A93C] text-[#0A0A0C]'
-                      : 'border-[#27272A] bg-[#111114] text-[#D4D4D8]'
-                  }`}
+                  onClick={() => navigateToView('downloads')}
+                  className="min-h-[44px] rounded-xl px-4 py-2 text-xs font-semibold border border-[#E6A93C] bg-[#E6A93C] text-[#0A0A0C] cursor-pointer transition-colors"
                 >
                   {t('navDownloads')}
                 </button>
               </div>
             </div>
 
-            {mainView === 'downloads' && (
-              <DownloadsManagerPanel
-                tasks={downloadManager.tasks}
-                storageUsedBytes={downloadManager.storageUsedBytes}
-                onPause={downloadManager.pauseDownload}
-                onResume={downloadManager.resumeDownload}
-                onRemove={(id) => void downloadManager.removeDownload(id)}
-                onOpenMovieById={handleOpenById}
-              />
-            )}
-
-            {mainView === 'search' && latestWatchedMovie && (
-              <div className="mb-6">
-                <BecauseYouWatchedRow
-                  seedMovie={latestWatchedMovie}
-                  allMovies={movies}
-                  onSelectMovie={(m) => handleOpenMovie(m, false)}
-                />
-              </div>
-            )}
+            <DownloadsManagerPanel
+              tasks={downloadManager.tasks}
+              storageUsedBytes={downloadManager.storageUsedBytes}
+              onPause={downloadManager.pauseDownload}
+              onResume={downloadManager.resumeDownload}
+              onRemove={(id) => void downloadManager.removeDownload(id)}
+              onOpenMovieById={handleOpenById}
+            />
 
             <MovieGrid
               movies={movies}
+              isOffline={isOffline}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
               selectedGenre={selectedGenre}
@@ -1543,6 +1735,23 @@ export default function App() {
               onOpenUpload={handleOpenUpload}
             />
           </div>
+        )}
+
+        {mainView === 'games' && (
+          <Suspense
+            fallback={
+              <div className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8 text-xs text-[#A1A1AA]">
+                Loading Temple Football 3D Arena...
+              </div>
+            }
+          >
+            <GamesHub
+              defaultPlayerId={activeUserId}
+              defaultPlayerName={activeUsername}
+              onBackToCinema={() => navigateToView('home', 'spotlight')}
+              onOpenChessLounge={() => navigateToView('lounge', 'chess-game')}
+            />
+          </Suspense>
         )}
 
         {mainView === 'lounge' && (
@@ -1601,8 +1810,8 @@ export default function App() {
 
             {/* Live Community Chat */}
             <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                <div className="lg:col-span-7">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start min-w-0">
+                <div className="lg:col-span-7 min-w-0">
                   <CommunityChat
                     messages={messages}
                     onlineUsers={onlineUsers}
@@ -1622,7 +1831,7 @@ export default function App() {
                   />
                 </div>
 
-                <div className="lg:col-span-5">
+                <div className="lg:col-span-5 min-w-0">
                   <section
                     id="archive-info"
                     className="rounded-xl border border-[#27272A] bg-[#111114] p-6"
@@ -1705,7 +1914,17 @@ export default function App() {
                 </div>
               }
             >
-              <ChessLounge />
+              <ChessLounge
+                userId={activeUserId}
+                username={activeUsername}
+                isWsConnected={isConnected}
+                onlineUsers={onlineUsers}
+                chessRoom={chessRoom}
+                chessRooms={chessRooms}
+                chessError={chessError}
+                onClearChessError={() => setChessError(null)}
+                sendWs={sendWs}
+              />
               <CinemaStage3D />
               <CinemaLocationsMap />
               <CinemaAIStudio />
@@ -1733,10 +1952,17 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => navigateToView('search', 'catalog')}
+              onClick={() => navigateToView('search', 'search-page')}
               className="hover:text-[#FAFAFA] transition-colors cursor-pointer"
             >
-              {t('navCatalog')}
+              {t('navSearch')}
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToView('games', 'games-section')}
+              className="hover:text-[#E5A93B] transition-colors cursor-pointer"
+            >
+              Games
             </button>
             <button
               type="button"
@@ -1985,14 +2211,16 @@ export default function App() {
           navigateToView('home', 'spotlight');
         }}
         onSelectSearch={() => {
-          navigateToView('search', 'catalog');
-          window.setTimeout(() => searchInputRef.current?.focus(), 80);
+          navigateToView('search', 'search-page');
         }}
         onSelectDownloads={() => {
           setCollectionView('all');
           setSelectedGenre('All');
           setCatalogSort('downloads');
           navigateToView('downloads', 'catalog');
+        }}
+        onSelectGames={() => {
+          navigateToView('games', 'games-section');
         }}
         onSelectLounge={() => {
           navigateToView('lounge');

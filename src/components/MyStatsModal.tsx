@@ -18,6 +18,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import type { DownloadTask, Movie, WatchProgressEntry } from '../types/cinema';
 import { formatFileSize, formatPlaybackTime } from '../utils/format';
 import { BecauseYouWatchedRow } from './BecauseYouWatchedRow';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export interface GenreStat {
   genre: string;
@@ -237,6 +238,9 @@ export function MyStatsModal({
             </button>
           )}
         </section>
+
+        {/* 3b. Get the Temple Cinema App Card */}
+        <PWAInstallButton variant="profile" />
 
         {/* 4. Watch History */}
         <section aria-label="Watch History">

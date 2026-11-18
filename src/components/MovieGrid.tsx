@@ -15,12 +15,14 @@ import { useLanguage } from '../contexts/LanguageContext';
 import type { MovieRatingSummary } from '../hooks/useMovieRatings';
 import type { Movie, MovieGenre, WatchProgressEntry } from '../types/cinema';
 import { formatFileSize, formatPlaybackTime } from '../utils/format';
+import { searchOfflineIndex } from '../utils/offlineSearchIndex';
 
 export type CollectionFilter = 'all' | 'saved' | 'uploads';
 export type CatalogSortOption = 'newest' | 'imdb' | 'downloads' | 'title';
 
 interface MovieGridProps {
   movies: Movie[];
+  isOffline?: boolean;
   searchQuery: string;
   onSearchChange: (query: string) => void;
   selectedGenre?: 'All' | MovieGenre;
@@ -90,6 +92,7 @@ function MoviePosterImage({ posterUrl, title }: { posterUrl: string; title: stri
 
 export function MovieGrid({
   movies,
+  isOffline = false,
   searchQuery,
   onSearchChange,
   selectedGenre: controlledGenre,
@@ -116,7 +119,9 @@ export function MovieGrid({
   const [internalGenre, setInternalGenre] = useState<'All' | MovieGenre>('All');
   const [internalSort, setInternalSort] = useState<CatalogSortOption>('newest');
 
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [filtersOpen, setFiltersOpen] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 640 : false
+  );
   const [selectedDirector, setSelectedDirector] = useState<string>('All');
   const [selectedCountry, setSelectedCountry] = useState<string>('All');
   const [yearFrom, setYearFrom] = useState<string>('');
@@ -211,6 +216,11 @@ export function MovieGrid({
     onChangeCollectionView('all');
   };
 
+  const offlineSearchResult = useMemo(
+    () => searchOfflineIndex(searchQuery, movies),
+    [searchQuery, movies]
+  );
+
   const scopedMovies = movies.filter((m) => {
     if (collectionView === 'saved' && !savedMovieIds.has(m.id)) return false;
     if (collectionView === 'uploads' && (!currentUserId || m.ownerUid !== currentUserId)) {
@@ -236,14 +246,7 @@ export function MovieGrid({
       return false;
     }
     if (!searchQuery.trim()) return true;
-    const q = searchQuery.trim().toLowerCase();
-    return (
-      m.title.toLowerCase().includes(q) ||
-      m.director.toLowerCase().includes(q) ||
-      m.genre.toLowerCase().includes(q) ||
-      (m.category || '').toLowerCase().includes(q) ||
-      (m.country || '').toLowerCase().includes(q)
-    );
+    return offlineSearchResult.matchedIds.has(m.id);
   });
 
   const categoryCounts = GENRES.reduce<Record<string, number>>((acc, genre) => {
@@ -263,6 +266,12 @@ export function MovieGrid({
       return m.genre === selectedGenre;
     })
     .sort((a, b) => {
+      if (searchQuery.trim()) {
+        const rankDiff =
+          (offlineSearchResult.scores.get(b.id) || 0) -
+          (offlineSearchResult.scores.get(a.id) || 0);
+        if (rankDiff !== 0) return rankDiff;
+      }
       if (sortBy === 'imdb') return (b.imdbRating ?? 7.8) - (a.imdbRating ?? 7.8);
       if (sortBy === 'downloads') return b.downloads - a.downloads;
       if (sortBy === 'title') return a.title.localeCompare(b.title);
@@ -270,20 +279,28 @@ export function MovieGrid({
     });
 
   return (
-    <section id="catalog" className="py-8">
-      <div className="flex flex-col gap-5 mb-6">
+    <section id="catalog" className="py-8 w-full max-w-full min-w-0 overflow-x-clip">
+      <div className="flex flex-col gap-5 mb-6 min-w-0">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-          <div>
+          <div className="min-w-0">
             <h2 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-[#FAFAFA]">
               {t('catalogTitle')}
             </h2>
             <p className="text-sm text-[#A1A1AA] mt-1">
               {t('catalogSubtitle')}
             </p>
+            {(isOffline || offlineSearchResult.usedLocalIndex) && (
+              <p className="mt-1.5 inline-flex items-center gap-1.5 font-mono text-[11px] text-[#E6A93C]">
+                <span>
+                  {isOffline ? 'Offline Search Index Active' : 'Local Search Index Ready'} ·{' '}
+                  {offlineSearchResult.indexedCount} cached titles
+                </span>
+              </p>
+            )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="relative flex-1 min-w-[200px] sm:w-60">
+          <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+            <div className="relative flex-1 min-w-0 w-full sm:w-60">
               <Search
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#71717A]"
                 aria-hidden="true"
@@ -471,8 +488,8 @@ export function MovieGrid({
         )}
 
         {/* Collection Scope + Genre Filter Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1 rounded-lg border border-[#27272A] bg-[#111114] p-1">
+        <div className="flex flex-wrap items-center justify-between gap-3 min-w-0">
+          <div className="flex max-w-full items-center gap-1 overflow-x-auto no-scrollbar rounded-lg border border-[#27272A] bg-[#111114] p-1">
             {(
               [
                 { id: 'all', label: t('allMovies') },
@@ -486,7 +503,7 @@ export function MovieGrid({
                   key={tab.id}
                   type="button"
                   onClick={() => onChangeCollectionView(tab.id)}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     active
                       ? 'bg-[#E5A93B] text-[#09090B] font-semibold'
                       : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
@@ -523,9 +540,9 @@ export function MovieGrid({
           </div>
         </div>
 
-        <div className="border-b border-[#27272A]">
+        <div className="border-b border-[#27272A] min-w-0 max-w-full">
           <div
-            className="flex items-center gap-1 overflow-x-auto"
+            className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full"
             role="tablist"
             aria-label="Filter movies by category"
           >
@@ -560,8 +577,8 @@ export function MovieGrid({
         </div>
 
         {hasAnyFilter && (
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#A1A1AA]">
-            <p className="font-mono tabular-nums">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#A1A1AA] min-w-0">
+            <p className="font-mono tabular-nums break-words min-w-0">
               {t('showingLabel')} {filtered.length}{' '}
               {filtered.length === 1 ? t('movieSingular') : t('moviePlural')}
               {selectedGenre !== 'All' ? ` ${t('inCategory')} ${selectedGenre}` : ''}

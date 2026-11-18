@@ -67,8 +67,11 @@ if (!self.define) {
     });
   };
 }
-define(['./workbox-8d0d8005'], (function (workbox) { 'use strict';
+define(['./workbox-f9afa1f1'], (function (workbox) { 'use strict';
 
+  workbox.setCacheNameDetails({
+    prefix: "temple-cinema-v4"
+  });
   self.skipWaiting();
   workbox.clientsClaim();
   /**
@@ -80,14 +83,16 @@ define(['./workbox-8d0d8005'], (function (workbox) { 'use strict';
     "url": "registerSW.js",
     "revision": "3ca0b8505b4bec776b69afdba2768812"
   }, {
-    "url": "index.html",
-    "revision": "0.4b4o63locr8"
+    "url": "/index.html",
+    "revision": "0.l648thk7238"
   }], {});
   workbox.cleanupOutdatedCaches();
-  workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
+  workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("/index.html"), {
     allowlist: [/^\/$/],
     denylist: [/^\/api\//, /^\/storage\//, /^\/ws/]
   }));
+  workbox.registerRoute(/\/api\/movies(\/chunked)?/i, new workbox.NetworkOnly(), 'POST');
+  workbox.registerRoute(/\/storage\/movies\/|\.(mp4|webm|mkv|mov|m4v|m3u8|ts)(\?.*)?$/i, new workbox.NetworkOnly(), 'GET');
   workbox.registerRoute(/\/api\/(movies|upcoming)$/i, new workbox.NetworkFirst({
     "cacheName": "cinema-api-catalog-cache",
     "networkTimeoutSeconds": 3,

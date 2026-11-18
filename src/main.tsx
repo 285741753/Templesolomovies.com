@@ -1,7 +1,9 @@
+import { registerSW } from 'virtual:pwa-register';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import { AuthProvider } from './contexts/AuthContext.tsx';
 import { LanguageProvider } from './contexts/LanguageContext.tsx';
+import { PWAInstallProvider } from './contexts/PWAInstallContext.tsx';
 import './index.css';
 
 (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
@@ -79,10 +81,33 @@ if (typeof document !== 'undefined') {
   );
 }
 
+if (typeof window !== 'undefined') {
+  if ('caches' in window) {
+    void window.caches.keys().then((keys) =>
+      Promise.all(
+        keys
+          .filter((key) => !key.includes('v4'))
+          .filter((key) => key.includes('precache') || key.includes('temple-cinema'))
+          .map((key) => window.caches.delete(key))
+      )
+    );
+  }
+  if ('serviceWorker' in navigator) {
+    registerSW({
+      immediate: true,
+      onRegisterError(error) {
+        console.warn('[PWA] Service worker registration skipped:', error);
+      },
+    });
+  }
+}
+
 createRoot(document.getElementById('root')!).render(
   <LanguageProvider>
     <AuthProvider>
-      <App />
+      <PWAInstallProvider>
+        <App />
+      </PWAInstallProvider>
     </AuthProvider>
   </LanguageProvider>
 );

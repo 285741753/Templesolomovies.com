@@ -63,7 +63,7 @@ interface AuthContextValue {
   updateUserProfile: (displayName: string, favoriteGenre?: MovieGenre) => Promise<void>;
   toggleSaveMovie: (movie: Movie) => Promise<boolean>;
   isMovieSaved: (movieId: string) => boolean;
-  getIdToken: () => Promise<string | null>;
+  getIdToken: (forceRefresh?: boolean) => Promise<string | null>;
 }
 
 const BOOTSTRAP_ADMIN_EMAIL = 'madubachigozie00@gmail.com';
@@ -333,9 +333,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [user, savedMovies]
   );
 
-  const getIdToken = useCallback(async () => {
+  const getIdToken = useCallback(async (forceRefresh = false) => {
     if (!auth.currentUser) return null;
-    return auth.currentUser.getIdToken();
+    return auth.currentUser.getIdToken(forceRefresh);
   }, []);
 
   return (

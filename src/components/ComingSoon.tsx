@@ -239,12 +239,12 @@ export function ComingSoon({
     <section
       id="coming-soon"
       aria-labelledby="coming-soon-heading"
-      className="border-b border-[#27272A] bg-[#09090B]"
+      className="w-full max-w-full overflow-x-clip border-b border-[#27272A] bg-[#09090B]"
     >
       <div className="mx-auto max-w-[1440px] px-4 py-9 sm:px-6 lg:px-8">
         {/* Section Header + Global Release Alert Signup */}
-        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-5 mb-7">
-          <div className="max-w-2xl">
+        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-5 mb-7 min-w-0">
+          <div className="max-w-2xl min-w-0">
             <div className="flex items-center gap-2 text-xs font-medium text-[#E5A93B] mb-1">
               <CalendarClock className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{t('comingSoonEyebrow')}</span>
@@ -448,8 +448,7 @@ export function ComingSoon({
                               }}
                               placeholder={t('alertEmailPlaceholder')}
                               aria-label={t('alertEmailPlaceholder')}
-                              autoFocus
-                              className="flex-1 min-w-0 rounded-lg border border-[#E5A93B] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] placeholder:text-[#71717A] focus:outline-none"
+                              className="flex-1 min-w-0 rounded-lg border border-[#E5A93B] bg-[#09090B] px-2.5 py-1.5 text-base text-[#FAFAFA] placeholder:text-[#71717A] focus:outline-none"
                             />
                             <button
                               type="submit"

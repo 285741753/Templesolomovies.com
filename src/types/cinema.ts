@@ -205,6 +205,44 @@ export interface WatchPartyState {
   participants: WatchPartyParticipant[];
 }
 
+export interface ChessRoomMovePayload {
+  fromRow: number;
+  fromCol: number;
+  toRow: number;
+  toCol: number;
+  promotion?: 'q' | 'r' | 'b' | 'n';
+  san: string;
+  byColor: 'w' | 'b';
+  ply: number;
+}
+
+export interface ChessRoomParticipant {
+  userId: string;
+  username: string;
+  color: 'w' | 'b';
+}
+
+export interface ChessRoomSummary {
+  roomCode: string;
+  hostName: string;
+  playersCount: number;
+  status: 'waiting' | 'playing' | 'finished';
+  createdAt: number;
+}
+
+export interface ChessRoomState {
+  roomCode: string;
+  hostUserId: string;
+  hostName: string;
+  players: ChessRoomParticipant[];
+  moves: ChessRoomMovePayload[];
+  turn: 'w' | 'b';
+  status: 'waiting' | 'playing' | 'finished';
+  resignedBy?: 'w' | 'b' | null;
+  winner?: 'w' | 'b' | null;
+  updatedAt: number;
+}
+
 export type ServerWsEvent =
   | {
       type: 'ws:init';
@@ -258,6 +296,22 @@ export type ServerWsEvent =
   | {
       type: 'party:error';
       message: string;
+    }
+  | {
+      type: 'chess:rooms';
+      rooms: ChessRoomSummary[];
+    }
+  | {
+      type: 'chess:state';
+      room: ChessRoomState;
+    }
+  | {
+      type: 'chess:left';
+      roomCode: string;
+    }
+  | {
+      type: 'chess:error';
+      message: string;
     };
 
 export type ClientWsEvent =
@@ -307,5 +361,41 @@ export type ClientWsEvent =
       movieId: string;
       isPlaying: boolean;
       currentTime: number;
+      userId: string;
+    }
+  | {
+      type: 'chess:list';
+    }
+  | {
+      type: 'chess:create';
+      userId: string;
+      username: string;
+      preferredColor?: 'w' | 'b' | 'random';
+    }
+  | {
+      type: 'chess:join';
+      roomCode: string;
+      userId: string;
+      username: string;
+    }
+  | {
+      type: 'chess:move';
+      roomCode: string;
+      userId: string;
+      move: ChessRoomMovePayload;
+    }
+  | {
+      type: 'chess:resign';
+      roomCode: string;
+      userId: string;
+    }
+  | {
+      type: 'chess:rematch';
+      roomCode: string;
+      userId: string;
+    }
+  | {
+      type: 'chess:leave';
+      roomCode: string;
       userId: string;
     };

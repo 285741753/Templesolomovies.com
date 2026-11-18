@@ -91,13 +91,13 @@ export function CategoryChipsBar({
   return (
     <section
       aria-label="Category filter chips"
-      className="border-b border-[#27272A]/80 bg-[#0A0A0C]"
+      className="w-full max-w-full overflow-hidden border-b border-[#27272A]/80 bg-[#0A0A0C]"
     >
-      <div className="mx-auto max-w-[1440px] px-4 py-3 sm:px-6 lg:px-8 flex items-center justify-between gap-3">
+      <div className="mx-auto max-w-[1440px] px-4 py-3 sm:px-6 lg:px-8 flex items-center justify-between gap-3 min-w-0">
         <div
           role="tablist"
           aria-label="Home categories"
-          className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5 flex-1"
+          className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto no-scrollbar py-0.5"
         >
           {HOME_CATEGORIES.map((category) => {
             const active = selectedCategory === category;

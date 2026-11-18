@@ -16,6 +16,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 import { downsampleFloat32, float32ToPcmBase64, pcmBase64ToFloat32 } from '../utils/liveAudio';
 
 type StudioTab = 'chat' | 'voice' | 'transcribe';
@@ -42,6 +43,7 @@ const LIVE_VOICES = ['Zephyr', 'Kore', 'Puck', 'Charon', 'Fenrir'] as const;
 
 export function CinemaAIStudio() {
   const { t } = useLanguage();
+  const { setBusyActivity } = usePWAInstall();
   const [activeTab, setActiveTab] = useState<StudioTab>('chat');
 
   // --- Tab 1: Search Grounded Chat ---
@@ -437,6 +439,18 @@ export function CinemaAIStudio() {
     setCopiedTranscript(true);
     window.setTimeout(() => setCopiedTranscript(false), 2000);
   };
+
+  useEffect(() => {
+    const micActive =
+      voiceStatus === 'connecting' ||
+      voiceStatus === 'live' ||
+      isRecordingClip ||
+      transcribing;
+    setBusyActivity('mic', micActive);
+    return () => {
+      setBusyActivity('mic', false);
+    };
+  }, [voiceStatus, isRecordingClip, transcribing, setBusyActivity]);
 
   return (
     <section

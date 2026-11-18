@@ -137,7 +137,7 @@ export function HeroSpotlight({
       id="spotlight"
       aria-roledescription="carousel"
       aria-label="Featured releases carousel"
-      className="border-b border-[#27272A]/80 bg-[#0A0A0C]"
+      className="w-full max-w-full overflow-x-clip border-b border-[#27272A]/80 bg-[#0A0A0C]"
     >
       <div className="mx-auto max-w-[1440px] px-4 pt-4 pb-5 sm:px-6 lg:px-8">
         {currentMovie ? (
@@ -221,9 +221,9 @@ export function HeroSpotlight({
 
             {/* Bottom Content Overlay */}
             <div className="relative z-10 p-4 sm:p-8 flex flex-col gap-4">
-              <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-5">
-                <div className="max-w-2xl">
-                  <h1 className="font-display text-2xl sm:text-5xl font-bold uppercase tracking-tight text-[#F5C563] leading-[1.06] text-balance drop-shadow-sm">
+              <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-5 min-w-0">
+                <div className="max-w-2xl min-w-0 w-full">
+                  <h1 className="font-display text-2xl sm:text-5xl font-bold uppercase tracking-tight text-[#F5C563] leading-[1.06] text-balance break-words drop-shadow-sm">
                     {currentMovie.title}
                   </h1>
 
