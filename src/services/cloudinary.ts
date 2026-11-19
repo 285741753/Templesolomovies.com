@@ -30,8 +30,18 @@ export const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
 const CLOUDINARY_CHUNK_THRESHOLD_BYTES = 20 * 1024 * 1024; // 20 MB
 const CLOUDINARY_CHUNK_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB chunks (>= 5 MB minimum for Cloudinary)
 
-const ALLOWED_POSTER_MIME = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
-const ALLOWED_POSTER_EXT = /\.(jpe?g|png|webp)$/i;
+const ALLOWED_POSTER_MIME = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+  'image/avif',
+  'image/heic',
+  'image/heif',
+]);
+const ALLOWED_POSTER_EXT = /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i;
 
 const ALLOWED_VIDEO_MIME = new Set([
   'video/mp4',
@@ -41,8 +51,14 @@ const ALLOWED_VIDEO_MIME = new Set([
   'video/quicktime',
   'video/3gpp',
   'video/x-m4v',
+  'video/x-msvideo',
+  'video/avi',
+  'video/mpeg',
+  'video/mp2t',
+  'video/x-flv',
+  'video/x-ms-wmv',
 ]);
-const ALLOWED_VIDEO_EXT = /\.(mp4|webm|mkv|mov|m4v)$/i;
+const ALLOWED_VIDEO_EXT = /\.(mp4|webm|mkv|mov|m4v|3gp|avi|mpeg|mpg|ts|flv|wmv)$/i;
 
 export function resolveApiUrl(apiPath: string): string {
   if (/^https?:\/\//i.test(apiPath)) return apiPath;
@@ -57,9 +73,19 @@ export function resolveApiUrl(apiPath: string): string {
 
 export async function compressPosterIfNeeded(
   file: File,
-  maxBytes = 800 * 1024
+  maxBytes = 600 * 1024,
+  forceJpgConversion = false
 ): Promise<File> {
-  if (!file || file.size <= maxBytes || typeof document === 'undefined') {
+  const isStandardPoster =
+    ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes((file.type || '').toLowerCase()) &&
+    /\.(jpe?g|png|webp)$/i.test(file.name || '');
+
+  if (
+    !file ||
+    (!forceJpgConversion && file.size <= maxBytes && isStandardPoster) ||
+    (file.size <= maxBytes && isStandardPoster) ||
+    typeof document === 'undefined'
+  ) {
     return file;
   }
   return new Promise<File>((resolve) => {
@@ -84,7 +110,7 @@ export async function compressPosterIfNeeded(
         canvas.toBlob(
           (blob) => {
             URL.revokeObjectURL(objectUrl);
-            if (!blob || blob.size >= file.size) {
+            if (!blob || (!forceJpgConversion && blob.size >= file.size)) {
               resolve(file);
               return;
             }
@@ -92,7 +118,7 @@ export async function compressPosterIfNeeded(
             resolve(new File([blob], `${cleanBase}.jpg`, { type: 'image/jpeg' }));
           },
           'image/jpeg',
-          0.82
+          0.84
         );
       } catch {
         URL.revokeObjectURL(objectUrl);
@@ -183,9 +209,12 @@ export function getCloudinaryConfig(): CloudinaryConfig {
 
 export function validatePosterFile(file: File): string | null {
   const mime = (file.type || '').toLowerCase();
-  const validType = ALLOWED_POSTER_MIME.has(mime) || ALLOWED_POSTER_EXT.test(file.name);
+  const validType =
+    mime.startsWith('image/') ||
+    ALLOWED_POSTER_MIME.has(mime) ||
+    ALLOWED_POSTER_EXT.test(file.name || '');
   if (!validType) {
-    return 'Poster must be a JPG, PNG, or WEBP image file.';
+    return 'Poster must be an image file (JPG, PNG, WEBP, GIF, or AVIF).';
   }
   if (file.size > MAX_POSTER_BYTES) {
     return `Poster image is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Maximum allowed is 10 MB.`;
@@ -203,7 +232,7 @@ export function validateVideoFile(file: File): string | null {
     ALLOWED_VIDEO_MIME.has(mime) ||
     ALLOWED_VIDEO_EXT.test(file.name || '');
   if (!validType) {
-    return 'Please choose a video file (MP4, WEBM, MKV, MOV, or M4V).';
+    return 'Please choose a video file (MP4, WEBM, MKV, MOV, M4V, AVI, or 3GP).';
   }
   if (file.size <= 0) {
     return 'Selected video file is empty.';

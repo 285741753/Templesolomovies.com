@@ -379,6 +379,29 @@
       "isSeeded": true,
       "createdAt": "2026-11-15T08:00:00.000Z",
       "imdbRating": 7.6
+    },
+    {
+      "id": "movie-lagos-symphony-live",
+      "title": "Lagos Symphony: Live Sessions",
+      "genre": "Music",
+      "category": "Music",
+      "country": "Nigeria",
+      "year": 2026,
+      "duration": "1h 32m",
+      "quality": "4K UHD",
+      "director": "Amara Okafor",
+      "uploader": "TempleSolo",
+      "synopsis": "Recorded live inside a candlelit concert hall, an acoustic collective blends orchestral brass, talking drums, and soaring vocal arrangements.",
+      "imdbRating": 8.6,
+      "posterUrl": "/storage/posters/upcoming_copper_symphony.jpg",
+      "videoUrl": "/storage/movies/lagos-symphony-live-4k.mp4",
+      "fileName": "lagos-symphony-live-4k.mp4",
+      "fileSizeBytes": 120407,
+      "mimeType": "video/mp4",
+      "downloads": 915,
+      "featured": false,
+      "isSeeded": true,
+      "createdAt": "2026-11-15T12:30:00.000Z"
     }
   ],
   "messages": [
@@ -390,7 +413,8 @@
       "text": "Welcome to templesolosmovies.com! Upload movies anytime with the Upload Movie button, download any film directly, or chat with everyone here.",
       "timestamp": "2026-11-15T08:00:00.000Z",
       "isSystem": true,
-      "likedBy": []
+      "likedBy": [],
+      "reactions": {}
     },
     {
       "id": "seed-msg-2",

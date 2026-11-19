@@ -1,4 +1,5 @@
 import type { Movie, MovieGenre, MovieQuality } from '../types/cinema';
+import { ALL_GENRE_NAMES, movieHasGenre } from './genres';
 import { enrichMovie } from './movieMetadata';
 
 export const OFFLINE_SEARCH_INDEX_KEY = 'tsm_offline_search_index_v1';
@@ -39,6 +40,8 @@ export interface OfflineIndexedDoc {
   id: string;
   title: string;
   genre: string;
+  genres?: string[];
+  language?: string;
   category: string;
   director: string;
   country: string;
@@ -102,6 +105,8 @@ function toIndexedDoc(movie: Movie): OfflineIndexedDoc {
     id: movie.id,
     title: movie.title,
     genre: movie.genre,
+    genres: Array.isArray(movie.genres) && movie.genres.length > 0 ? movie.genres : [movie.genre],
+    language: movie.language,
     category: movie.category || 'Movies',
     director: movie.director || 'Independent',
     country: movie.country || 'International',
@@ -140,6 +145,8 @@ export function buildAndSaveOfflineSearchIndex(movies: Movie[]): OfflineSearchIn
       doc.title,
       doc.director,
       doc.genre,
+      ...(doc.genres || []),
+      doc.language || '',
       doc.category,
       doc.country,
       String(doc.year),
@@ -230,6 +237,8 @@ export function hydrateMoviesFromOfflineIndex(): Movie[] {
       id: doc.id,
       title: doc.title,
       genre: doc.genre as Movie['genre'],
+      genres: doc.genres,
+      language: doc.language,
       category: doc.category as Movie['category'],
       country: doc.country,
       year: doc.year,
@@ -359,28 +368,12 @@ export function searchOfflineIndex(
   };
 }
 
-const KNOWN_GENRES: MovieGenre[] = [
-  'Action',
-  'Nollywood',
-  'Sci-Fi',
-  'Music',
-  'Thriller',
-  'Drama',
-  'Mystery',
-  'Comedy',
-  'Documentary',
-  'Animation',
-  'Horror',
-];
+const KNOWN_GENRES: MovieGenre[] = ALL_GENRE_NAMES;
 
 const KNOWN_QUALITIES: MovieQuality[] = ['4K UHD', '1080p HD', '720p HD'];
 
 function matchesGenreFilter(movie: Movie, genre: 'All' | MovieGenre): boolean {
-  if (genre === 'All') return true;
-  if (genre === 'Music') {
-    return movie.genre === 'Music' || movie.category === 'Music';
-  }
-  return movie.genre === genre;
+  return movieHasGenre(movie, genre);
 }
 
 export function queryCachedOfflineMovies(

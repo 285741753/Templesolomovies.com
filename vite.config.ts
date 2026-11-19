@@ -31,15 +31,27 @@ export default defineConfig(() => {
         ],
         manifest: false,
         workbox: {
-          cacheId: 'temple-cinema-v4',
+          cacheId: 'temple-cinema-v5',
           cleanupOutdatedCaches: true,
           skipWaiting: true,
           clientsClaim: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,woff,woff2}'],
           navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\//, /^\/storage\//, /^\/ws/, /^\/socket\.io\//, /^\/downloads\//],
+          navigateFallbackDenylist: [
+            /^\/api\//,
+            /^\/auth\//,
+            /^\/storage\//,
+            /^\/ws/,
+            /^\/socket\.io\//,
+            /^\/downloads\//,
+          ],
           runtimeCaching: [
+            {
+              urlPattern: /\/api\/ai\//i,
+              method: 'POST',
+              handler: 'NetworkOnly',
+            },
             {
               urlPattern: /\/api\/movies(\/chunked)?/i,
               method: 'POST',
@@ -113,7 +125,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),

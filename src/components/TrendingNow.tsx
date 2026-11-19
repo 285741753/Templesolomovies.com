@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { Download, Film, Play, TrendingUp } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { Movie } from '../types/cinema';
@@ -36,7 +36,7 @@ function TrendingPoster({ posterUrl, title }: { posterUrl: string; title: string
   );
 }
 
-export function TrendingNow({ movies, onDownload, onSelectMovie }: TrendingNowProps) {
+export const TrendingNow = memo(function TrendingNow({ movies, onDownload, onSelectMovie }: TrendingNowProps) {
   const { t } = useLanguage();
   const topFive = useMemo(() => {
     const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
@@ -59,7 +59,7 @@ export function TrendingNow({ movies, onDownload, onSelectMovie }: TrendingNowPr
     <section
       id="trending-now"
       aria-labelledby="trending-heading"
-      className="border-b border-[#27272A] bg-[#09090B]"
+      className="perf-section border-b border-[#27272A] bg-[#09090B]"
     >
       <div className="mx-auto max-w-[1440px] px-4 py-8 sm:px-6 lg:px-8">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2 mb-6">
@@ -157,4 +157,4 @@ export function TrendingNow({ movies, onDownload, onSelectMovie }: TrendingNowPr
       </div>
     </section>
   );
-}
+});

@@ -111,6 +111,23 @@ export function enrichMovie(movie: Movie): Movie {
     ? movie.episodes
     : SEEDED_SERIES_EPISODES[movie.id];
   const country = inferMovieCountry(movie);
+  const genres = Array.from(
+    new Set(
+      [
+        movie.genre,
+        ...(Array.isArray(movie.genres) ? movie.genres : []),
+      ]
+        .map((g) => (typeof g === 'string' ? g.trim() : ''))
+        .filter(Boolean)
+    )
+  );
+  const language =
+    movie.language?.trim() ||
+    (movie.category === 'K-Drama'
+      ? 'Korean'
+      : movie.category === 'Anime'
+        ? 'Japanese'
+        : 'English');
   const audioLanguages = movie.audioLanguages?.length
     ? movie.audioLanguages
     : country === 'Nigeria'
@@ -122,6 +139,8 @@ export function enrichMovie(movie: Movie): Movie {
 
   return {
     ...movie,
+    genres: genres.length > 0 ? genres : [movie.genre || 'Drama'],
+    language,
     country,
     category: movie.category || (episodes?.length ? 'Series' : movie.genre === 'Nollywood' ? 'Nollywood' : 'Movies'),
     episodes,

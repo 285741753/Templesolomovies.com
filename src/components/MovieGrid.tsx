@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   Download,
   Play,
@@ -90,7 +90,7 @@ function MoviePosterImage({ posterUrl, title }: { posterUrl: string; title: stri
   );
 }
 
-export function MovieGrid({
+export const MovieGrid = memo(function MovieGrid({
   movies,
   isOffline = false,
   searchQuery,
@@ -853,4 +853,4 @@ export function MovieGrid({
       )}
     </section>
   );
-}
+});

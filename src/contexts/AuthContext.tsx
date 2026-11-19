@@ -154,24 +154,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         nextUser.emailVerified &&
           nextUser.email?.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL
       );
-      setIsAdmin(isBootstrapAdmin);
 
+      let cachedDisplayName = sanitizeDisplayName(nextUser.displayName || '', nextUser.email);
+      let cachedAdmin = isBootstrapAdmin;
+      try {
+        const rawHint = localStorage.getItem(`tsm_auth_hint_${nextUser.uid}`);
+        if (rawHint) {
+          const parsed = JSON.parse(rawHint) as { displayName?: string; isAdmin?: boolean };
+          if (parsed.displayName) cachedDisplayName = parsed.displayName;
+          if (!isBootstrapAdmin && typeof parsed.isAdmin === 'boolean') cachedAdmin = parsed.isAdmin;
+        }
+      } catch {
+        // Ignore cache read error
+      }
+
+      setIsAdmin(cachedAdmin);
       setProfile({
         uid: nextUser.uid,
-        displayName: sanitizeDisplayName(nextUser.displayName || '', nextUser.email),
+        displayName: cachedDisplayName,
       });
 
-      try {
-        await ensureUserDocuments(nextUser);
-      } catch {
+      // Run Firestore user doc sync in background so auth & admin UI are instant
+      void ensureUserDocuments(nextUser).catch(() => {
         // Error already logged cleanly by handleFirestoreError
-      }
+      });
 
       if (!isBootstrapAdmin) {
         const adminPath = `admins/${nextUser.uid}`;
         try {
           const adminSnap = await getDocFromServer(doc(db, 'admins', nextUser.uid));
-          setIsAdmin(adminSnap.exists());
+          const resolvedAdmin = adminSnap.exists();
+          setIsAdmin(resolvedAdmin);
+          try {
+            localStorage.setItem(
+              `tsm_auth_hint_${nextUser.uid}`,
+              JSON.stringify({ displayName: cachedDisplayName, isAdmin: resolvedAdmin })
+            );
+          } catch {
+            // Ignore cache write error
+          }
         } catch (err) {
           handleFirestoreError(err, OperationType.GET, adminPath);
         }

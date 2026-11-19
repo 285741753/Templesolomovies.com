@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { ArrowRight, Bookmark, Download, Film, Play, Sparkles, Star } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { MovieRatingSummary } from '../hooks/useMovieRatings';
@@ -41,7 +41,7 @@ function NewReleasePoster({ posterUrl, title }: { posterUrl: string; title: stri
   );
 }
 
-export function NewReleasesRow({
+export const NewReleasesRow = memo(function NewReleasesRow({
   movies,
   savedMovieIds,
   ratingsByMovie,
@@ -72,7 +72,7 @@ export function NewReleasesRow({
     <section
       id="new-releases"
       aria-labelledby="new-releases-heading"
-      className="border-b border-[#27272A]/80 bg-[#0A0A0C]"
+      className="perf-section border-b border-[#27272A]/80 bg-[#0A0A0C]"
     >
       <div className="mx-auto max-w-[1440px] px-4 py-7 sm:px-6 lg:px-8">
         <div className="flex items-end justify-between gap-4 mb-5">
@@ -198,4 +198,4 @@ export function NewReleasesRow({
       </div>
     </section>
   );
-}
+});

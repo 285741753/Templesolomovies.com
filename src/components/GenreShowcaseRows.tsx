@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { ArrowRight, Bookmark, Film, Play, Star } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { MovieRatingSummary } from '../hooks/useMovieRatings';
@@ -54,7 +54,7 @@ function ShowcasePosterImage({ posterUrl, title }: { posterUrl: string; title: s
   );
 }
 
-export function GenreShowcaseRows({
+export const GenreShowcaseRows = memo(function GenreShowcaseRows({
   movies,
   savedMovieIds,
   ratingsByMovie,
@@ -64,12 +64,25 @@ export function GenreShowcaseRows({
 }: GenreShowcaseRowsProps) {
   const { t } = useLanguage();
 
+  const groupedByGenre = useMemo(() => {
+    const map = new Map<MovieGenre, Movie[]>();
+    for (const movie of movies) {
+      const list = map.get(movie.genre);
+      if (list) {
+        if (list.length < 4) list.push(movie);
+      } else {
+        map.set(movie.genre, [movie]);
+      }
+    }
+    return map;
+  }, [movies]);
+
   return (
-    <section aria-label="Curated Genre Rows" className="border-b border-[#27272A]/80 bg-[#09090B]">
+    <section aria-label="Curated Genre Rows" className="perf-section border-b border-[#27272A]/80 bg-[#09090B]">
       <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8 space-y-8">
         {SHOWCASE_GENRES.map((genre) => {
-          const items = movies.filter((m) => m.genre === genre).slice(0, 4);
-          if (items.length === 0) return null;
+          const items = groupedByGenre.get(genre);
+          if (!items || items.length === 0) return null;
 
           return (
             <div key={genre}>
@@ -176,4 +189,4 @@ export function GenreShowcaseRows({
       </div>
     </section>
   );
-}
+});

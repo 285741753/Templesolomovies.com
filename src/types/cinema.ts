@@ -1,18 +1,7 @@
 export const WHATSAPP_CHANNEL_URL =
   'https://whatsapp.com/channel/0029VbD1VkL9sBI2TwMNmg3I';
 
-export type MovieGenre =
-  | 'Action'
-  | 'Nollywood'
-  | 'Sci-Fi'
-  | 'Music'
-  | 'Thriller'
-  | 'Drama'
-  | 'Mystery'
-  | 'Comedy'
-  | 'Documentary'
-  | 'Animation'
-  | 'Horror';
+export type MovieGenre = string;
 
 export type HomeCategoryChip =
   | 'All'
@@ -24,6 +13,49 @@ export type HomeCategoryChip =
   | 'K-Drama';
 
 export type MovieQuality = '4K UHD' | '1080p HD' | '720p HD';
+
+export interface MusicTrack {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  durationSec: number;
+  durationLabel: string;
+  coverUrl: string;
+  previewUrl: string | null;
+  externalUrl: string;
+  boomplayUrl: string;
+  spotifyUrl: string;
+  spotifyUri?: string;
+  provider: 'spotify' | 'deezer' | 'boomplay';
+}
+
+export interface MusicArtist {
+  id: string;
+  name: string;
+  imageUrl: string;
+  followers?: number;
+  genres?: string[];
+  externalUrl: string;
+  spotifyUrl: string;
+  boomplayUrl: string;
+  provider: 'spotify' | 'deezer' | 'boomplay';
+}
+
+export interface MusicAlbum {
+  id: string;
+  title: string;
+  artist: string;
+  coverUrl: string;
+  releaseDate?: string;
+  totalTracks?: number;
+  externalUrl: string;
+  spotifyUrl: string;
+  boomplayUrl: string;
+  provider: 'spotify' | 'deezer' | 'boomplay';
+}
+
+export type MusicSearchType = 'track' | 'artist' | 'album';
 
 export interface SeriesEpisode {
   id: string;
@@ -38,6 +70,8 @@ export interface SeriesEpisode {
 export interface MovieMetadata {
   title: string;
   genre: MovieGenre;
+  genres?: string[];
+  language?: string;
   category?: Exclude<HomeCategoryChip, 'All'>;
   country?: string;
   year: number;
@@ -77,6 +111,8 @@ export interface UpcomingMovie {
   id: string;
   title: string;
   genre: MovieGenre;
+  genres?: string[];
+  language?: string;
   releaseDate: string; // YYYY-MM-DD
   duration: string;
   quality: MovieQuality;
@@ -181,6 +217,7 @@ export interface ChatMessage {
   isSystem?: boolean;
   movieRef?: MovieChatReference;
   likedBy?: string[];
+  reactions?: Record<string, string[]>;
 }
 
 export interface OnlineUser {
@@ -286,6 +323,11 @@ export type ServerWsEvent =
       likedBy: string[];
     }
   | {
+      type: 'chat:reaction_updated';
+      messageId: string;
+      reactions: Record<string, string[]>;
+    }
+  | {
       type: 'presence:update';
       onlineUsers: OnlineUser[];
     }
@@ -342,6 +384,12 @@ export type ClientWsEvent =
       type: 'chat:like';
       messageId: string;
       userId: string;
+    }
+  | {
+      type: 'chat:react';
+      messageId: string;
+      userId: string;
+      emoji: string;
     }
   | {
       type: 'party:join';

@@ -9,6 +9,7 @@ import { useWatchProgress } from './hooks/useWatchProgress';
 import { isCellularConnection, useAppSettings } from './hooks/useAppSettings';
 import { useDownloadManager } from './hooks/useDownloadManager';
 import { usePWAInstall } from './hooks/usePWAInstall';
+import { useMusicPlayer } from './contexts/MusicPlayerContext';
 import {
   WHATSAPP_CHANNEL_URL,
   type ChatMessage,
@@ -41,15 +42,28 @@ import { GenreShowcaseRows } from './components/GenreShowcaseRows';
 import { NewReleasesRow } from './components/NewReleasesRow';
 import { BottomNavBar, type MobileNavTab } from './components/BottomNavBar';
 import { TrendingNow } from './components/TrendingNow';
-import { ComingSoon } from './components/ComingSoon';
 import { MovieGrid, type CollectionFilter } from './components/MovieGrid';
-import { SearchPage } from './components/SearchPage';
-import { DownloadsManagerPanel } from './components/DownloadsManagerPanel';
-import { CommunityChat } from './components/CommunityChat';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { MusicPlayerBar } from './components/MusicPlayerBar';
 import { TempleLogoIcon } from './components/TempleLogo';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import type { UserWatchStats } from './components/MyStatsModal';
 
+const ComingSoon = lazy(() =>
+  import('./components/ComingSoon').then((m) => ({ default: m.ComingSoon }))
+);
+const SearchPage = lazy(() =>
+  import('./components/SearchPage').then((m) => ({ default: m.SearchPage }))
+);
+const DownloadsManagerPanel = lazy(() =>
+  import('./components/DownloadsManagerPanel').then((m) => ({ default: m.DownloadsManagerPanel }))
+);
+const CommunityChat = lazy(() =>
+  import('./components/CommunityChat').then((m) => ({ default: m.CommunityChat }))
+);
+const MusicShowcaseRow = lazy(() =>
+  import('./components/MusicShowcaseRow').then((m) => ({ default: m.MusicShowcaseRow }))
+);
 const UploadMovieModal = lazy(() =>
   import('./components/UploadMovieModal').then((m) => ({ default: m.UploadMovieModal }))
 );
@@ -303,7 +317,15 @@ export default function App() {
     getIdToken,
   } = useAuth();
   const downloadManager = useDownloadManager();
-  const { ratingsByMovie, rateMovie } = useMovieRatings(user?.uid);
+  const {
+    ratingsByMovie,
+    pendingRatingsByMovie,
+    rateMovie,
+  } = useMovieRatings(user?.uid, (syncedCount) => {
+    showNotice(
+      `Synced ${syncedCount} offline movie ${syncedCount === 1 ? 'rating' : 'ratings'} to the server.`
+    );
+  });
   const {
     reviewsByMovie,
     reviewCountByMovie,
@@ -393,10 +415,15 @@ export default function App() {
   );
   const [isLowNetwork, setIsLowNetwork] = useState<boolean>(() => detectLowNetwork());
   const { setBusyActivity } = usePWAInstall();
+  const { pauseMusic, currentTrack, isMiniDismissed } = useMusicPlayer();
 
   useEffect(() => {
-    setBusyActivity('playback', Boolean(selectedMovie || isWatchPartyOpen));
-  }, [selectedMovie, isWatchPartyOpen, setBusyActivity]);
+    const movieActive = Boolean(selectedMovie || isWatchPartyOpen);
+    setBusyActivity('playback', movieActive);
+    if (movieActive) {
+      pauseMusic();
+    }
+  }, [selectedMovie, isWatchPartyOpen, setBusyActivity, pauseMusic]);
 
   useEffect(() => {
     setBusyActivity('upload', Boolean(isUploadOpen || isAdminPanelOpen));
@@ -591,6 +618,18 @@ export default function App() {
 
     void loadMovies(0);
 
+    return () => {
+      active = false;
+      activeController?.abort();
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, []);
+
+  const hasFetchedChatRef = useRef(false);
+  useEffect(() => {
+    if (mainView !== 'lounge' || hasFetchedChatRef.current) return;
+    hasFetchedChatRef.current = true;
+    let active = true;
     const loadChatMessages = async () => {
       try {
         const res = await fetch('/api/chat/messages');
@@ -611,19 +650,15 @@ export default function App() {
         // Ignore transient chat load error; WebSocket / polling will retry
       }
     };
-
     void loadChatMessages();
-
     return () => {
       active = false;
-      activeController?.abort();
-      if (retryTimer) window.clearTimeout(retryTimer);
     };
-  }, []);
+  }, [mainView]);
 
-  // Poll chat messages over HTTP while WebSocket is disconnected
+  // Poll chat messages over HTTP while WebSocket is disconnected (only on Lounge tab)
   useEffect(() => {
-    if (isConnected) return;
+    if (isConnected || mainView !== 'lounge') return;
     let cancelled = false;
     const syncMessages = async () => {
       if (cancelled || document.visibilityState !== 'visible') return;
@@ -652,7 +687,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [isConnected]);
+  }, [isConnected, mainView]);
 
   useEffect(() => {
     const key = user ? `tsm_watched_${user.uid}` : 'tsm_watched_guest';
@@ -810,6 +845,12 @@ export default function App() {
                 m.id === data.messageId ? { ...m, likedBy: data.likedBy } : m
               )
             );
+          } else if (data.type === 'chat:reaction_updated') {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === data.messageId ? { ...m, reactions: data.reactions } : m
+              )
+            );
           } else if (data.type === 'presence:update') {
             setOnlineUsers(data.onlineUsers);
           } else if (data.type === 'party:state') {
@@ -840,10 +881,11 @@ export default function App() {
       };
     };
 
-    connect();
+    const startTimer = window.setTimeout(connect, 150);
 
     return () => {
       unmounted = true;
+      window.clearTimeout(startTimer);
       if (reconnectTimerRef.current) {
         window.clearTimeout(reconnectTimerRef.current);
       }
@@ -1040,14 +1082,81 @@ export default function App() {
     }
   };
 
+  const handleToggleReaction = useCallback(
+    (messageId: string, emoji: string) => {
+      const cleanEmoji = emoji.trim();
+      if (!cleanEmoji) return;
+
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          const nextReactions: Record<string, string[]> = { ...(m.reactions || {}) };
+          const currentReactors = Array.isArray(nextReactions[cleanEmoji])
+            ? nextReactions[cleanEmoji]
+            : [];
+          if (currentReactors.includes(activeUserId)) {
+            const filtered = currentReactors.filter((id) => id !== activeUserId);
+            if (filtered.length > 0) {
+              nextReactions[cleanEmoji] = filtered;
+            } else {
+              delete nextReactions[cleanEmoji];
+            }
+          } else {
+            nextReactions[cleanEmoji] = [...currentReactors, activeUserId];
+          }
+          return { ...m, reactions: nextReactions };
+        })
+      );
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        sendWs({
+          type: 'chat:react',
+          messageId,
+          userId: activeUserId,
+          emoji: cleanEmoji,
+        });
+      } else {
+        void fetch(`/api/chat/messages/${encodeURIComponent(messageId)}/react`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: activeUserId, emoji: cleanEmoji }),
+        })
+          .then((res) => (res.ok ? res.json() : null))
+          .then(
+            (payload: { messageId?: string; reactions?: Record<string, string[]> } | null) => {
+              if (payload?.messageId && payload.reactions) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === payload.messageId ? { ...m, reactions: payload.reactions } : m
+                  )
+                );
+              }
+            }
+          )
+          .catch(() => {});
+      }
+    },
+    [activeUserId, sendWs]
+  );
+
   const handleOpenMovie = useCallback((movie: Movie, trailerMode = false) => {
     setSelectedMovieInitialTrailer(trailerMode);
     setSelectedMovie(movie);
   }, []);
 
-  const handleDownloadMovie = (movie: Movie) => {
+  const handleOpenMovieDirect = useCallback(
+    (movie: Movie) => handleOpenMovie(movie, false),
+    [handleOpenMovie]
+  );
+
+  const handleOpenMovieTrailer = useCallback(
+    (movie: Movie) => handleOpenMovie(movie, true),
+    [handleOpenMovie]
+  );
+
+  const handleDownloadMovie = useCallback((movie: Movie) => {
     setDownloadPickerMovie(movie);
-  };
+  }, []);
 
   const handleConfirmTierDownload = (movie: Movie, tier: DownloadQualityTier) => {
     if (settings.downloadWifiOnly && isCellularConnection()) {
@@ -1068,7 +1177,7 @@ export default function App() {
     if (found) handleOpenMovie(found, false);
   };
 
-  const handleShareToChat = (movie: Movie) => {
+  const handleShareToChat = useCallback((movie: Movie) => {
     setPendingMovieRef({
       id: movie.id,
       title: movie.title,
@@ -1082,26 +1191,33 @@ export default function App() {
     window.setTimeout(() => {
       document.getElementById('community-chat')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }, 80);
-  };
+  }, []);
 
-  const handleToggleSave = async (movie: Movie) => {
-    if (!user) {
-      setAuthModalState({ open: true, mode: 'login' });
-      showNotice('Log in or sign up to save movies to your personal watchlist.');
-      return;
-    }
-    const saved = await toggleSaveMovie(movie);
-    showNotice(saved ? `Saved "${movie.title}" to your watchlist.` : `Removed "${movie.title}" from watchlist.`);
-  };
+  const handleToggleSave = useCallback(
+    async (movie: Movie) => {
+      if (!user) {
+        setAuthModalState({ open: true, mode: 'login' });
+        showNotice('Log in or sign up to save movies to your personal watchlist.');
+        return;
+      }
+      const saved = await toggleSaveMovie(movie);
+      showNotice(saved ? `Saved "${movie.title}" to your watchlist.` : `Removed "${movie.title}" from watchlist.`);
+    },
+    [user, toggleSaveMovie, showNotice]
+  );
 
   const handleRateMovie = async (movieId: string, stars: number) => {
-    if (!user) {
+    if (!user && !isOffline) {
       setAuthModalState({ open: true, mode: 'login' });
       showNotice('Log in or sign up to submit a 5-star rating.');
       return;
     }
-    await rateMovie(movieId, stars);
-    showNotice(`Saved your ${stars}-star rating.`);
+    const result = await rateMovie(movieId, stars);
+    if (result === 'queued-offline') {
+      showNotice(`Saved your ${stars}-star rating offline — it will sync once connected.`);
+    } else {
+      showNotice(`Saved your ${stars}-star rating.`);
+    }
   };
 
   const handleSubmitReview = async (input: SubmitReviewInput) => {
@@ -1120,7 +1236,7 @@ export default function App() {
     showNotice('Movie review removed.');
   };
 
-  const handleOpenUpload = () => {
+  const handleOpenUpload = useCallback(() => {
     if (!user) {
       setAuthModalState({ open: true, mode: 'login' });
       showNotice('Log in with the administrator account to upload movies.');
@@ -1131,20 +1247,23 @@ export default function App() {
       return;
     }
     setIsUploadOpen(true);
-  };
+  }, [user, isAdmin, showNotice]);
 
-  const handleSelectCollection = (view: CollectionFilter) => {
-    if (view === 'saved' && !user) {
-      setAuthModalState({ open: true, mode: 'login' });
-      showNotice('Log in to access your saved watchlist.');
-      return;
-    }
-    if (view === 'uploads' && !isAdmin) {
-      showNotice('Only the site administrator can manage uploaded movies.');
-      return;
-    }
-    setCollectionView(view);
-  };
+  const handleSelectCollection = useCallback(
+    (view: CollectionFilter) => {
+      if (view === 'saved' && !user) {
+        setAuthModalState({ open: true, mode: 'login' });
+        showNotice('Log in to access your saved watchlist.');
+        return;
+      }
+      if (view === 'uploads' && !isAdmin) {
+        showNotice('Only the site administrator can manage uploaded movies.');
+        return;
+      }
+      setCollectionView(view);
+    },
+    [user, isAdmin, showNotice]
+  );
 
   const handleUpdateMovie = async (
     movieId: string,
@@ -1349,7 +1468,12 @@ export default function App() {
     setMainView(view);
     setMobileNavTab(view);
     syncMainViewInUrl(view);
-    if (anchorId) {
+    if (anchorId === 'ai-transcribe') {
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('temple-open-ai-tab', { detail: 'transcribe' }));
+        document.getElementById('ai-studio')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 120);
+    } else if (anchorId) {
       window.setTimeout(() => {
         document.getElementById(anchorId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 60);
@@ -1382,7 +1506,30 @@ export default function App() {
     return continueWatchingList.filter((entry) => allowedIds.has(entry.movieId));
   }, [continueWatchingList, categoryFilteredMovies, homeCategory]);
 
-  const totalDownloads = movies.reduce((sum, m) => sum + m.downloads, 0);
+  const totalDownloads = useMemo(
+    () => movies.reduce((sum, m) => sum + m.downloads, 0),
+    [movies]
+  );
+
+  const handleSeeAllGenre = useCallback(
+    (genre: MovieGenre) => {
+      setCollectionView('all');
+      setSelectedGenre(genre);
+      setSelectedQuality('All');
+      navigateToView('search', 'search-page');
+    },
+    [navigateToView]
+  );
+
+  const handleSeeAllNewReleases = useCallback(() => {
+    setCollectionView('all');
+    setSelectedGenre('All');
+    setSelectedQuality('All');
+    setSearchSort('newest');
+    navigateToView('search', 'search-page');
+  }, [navigateToView]);
+
+  const handleOpenRequestModal = useCallback(() => setIsRequestModalOpen(true), []);
 
   const savedMoviesList = useMemo(
     () => movies.filter((m) => savedMovieIds.has(m.id)),
@@ -1518,8 +1665,8 @@ export default function App() {
                   isAdmin={isAdmin}
                   isMovieSaved={isMovieSaved}
                   onDownload={handleDownloadMovie}
-                  onPreview={(m) => handleOpenMovie(m, false)}
-                  onWatchTrailer={(m) => handleOpenMovie(m, true)}
+                  onPreview={handleOpenMovieDirect}
+                  onWatchTrailer={handleOpenMovieTrailer}
                   onToggleSave={handleToggleSave}
                   onStartWatchParty={handleStartMovieWatchParty}
                   onOpenUpload={handleOpenUpload}
@@ -1531,6 +1678,14 @@ export default function App() {
                   onSelectCategory={setHomeCategory}
                   filteredCount={categoryFilteredMovies.length}
                 />
+
+                {homeCategory === 'Music' && (
+                  <ErrorBoundary sectionName="Music" compact>
+                    <Suspense fallback={null}>
+                      <MusicShowcaseRow />
+                    </Suspense>
+                  </ErrorBoundary>
+                )}
 
                 {categoryFilteredMovies.length === 0 ? (
                   <section className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8">
@@ -1564,7 +1719,7 @@ export default function App() {
                     <TrendingNow
                       movies={categoryFilteredMovies}
                       onDownload={handleDownloadMovie}
-                      onSelectMovie={(m) => handleOpenMovie(m, false)}
+                      onSelectMovie={handleOpenMovieDirect}
                     />
 
                     {/* 5. Genre rows (Action, Nollywood, Sci-Fi, etc.) */}
@@ -1572,14 +1727,9 @@ export default function App() {
                       movies={categoryFilteredMovies}
                       savedMovieIds={savedMovieIds}
                       ratingsByMovie={ratingsByMovie}
-                      onSelectMovie={(m) => handleOpenMovie(m, false)}
+                      onSelectMovie={handleOpenMovieDirect}
                       onToggleSave={handleToggleSave}
-                      onSeeAllGenre={(genre) => {
-                        setCollectionView('all');
-                        setSelectedGenre(genre);
-                        setSelectedQuality('All');
-                        navigateToView('search', 'search-page');
-                      }}
+                      onSeeAllGenre={handleSeeAllGenre}
                     />
 
                     {/* 6. New Releases */}
@@ -1587,50 +1737,56 @@ export default function App() {
                       movies={categoryFilteredMovies}
                       savedMovieIds={savedMovieIds}
                       ratingsByMovie={ratingsByMovie}
-                      onSelectMovie={(m) => handleOpenMovie(m, false)}
+                      onSelectMovie={handleOpenMovieDirect}
                       onDownload={handleDownloadMovie}
                       onToggleSave={handleToggleSave}
-                      onSeeAll={() => {
-                        setCollectionView('all');
-                        setSelectedGenre('All');
-                        setSelectedQuality('All');
-                        setSearchSort('newest');
-                        navigateToView('search', 'search-page');
-                      }}
+                      onSeeAll={handleSeeAllNewReleases}
                     />
+
+                    {homeCategory !== 'Music' && (
+                      <ErrorBoundary sectionName="Music" compact>
+                        <Suspense fallback={null}>
+                          <MusicShowcaseRow />
+                        </Suspense>
+                      </ErrorBoundary>
+                    )}
                   </>
                 )}
 
                 {/* 6 (cont). Coming Soon */}
-                <ComingSoon
-                  upcomingMovies={upcomingMovies}
-                  isLoading={isUpcomingLoading}
-                  error={upcomingError}
-                  subscribedIds={subscribedIdSet}
-                  effectiveEmail={effectiveEmail}
-                  isAdmin={isAdmin}
-                  onRetry={() => void retryUpcoming()}
-                  onSubscribe={async (release: UpcomingMovie, email?: string) => {
-                    const res = await subscribeToRelease(release, email);
-                    showNotice(`Release alert enabled for "${release.title}" (${res.email}).`);
-                  }}
-                  onUnsubscribe={async (release: UpcomingMovie) => {
-                    await unsubscribeFromRelease(release);
-                    showNotice(`Release alert removed for "${release.title}".`);
-                  }}
-                  onSubscribeAll={async (email?: string) => {
-                    const res = await subscribeToAllUpcoming(email);
-                    showNotice(`Subscribed ${res.email} to ${res.count} upcoming release alerts.`);
-                  }}
-                  onCreateUpcoming={async (input) => {
-                    const created = await createUpcomingRelease(input);
-                    showNotice(`Scheduled "${created.title}" in Coming Soon.`);
-                  }}
-                  onDeleteUpcoming={async (releaseId) => {
-                    await deleteUpcomingRelease(releaseId);
-                    showNotice('Removed upcoming release.');
-                  }}
-                />
+                <ErrorBoundary sectionName="Coming Soon" compact>
+                  <Suspense fallback={null}>
+                    <ComingSoon
+                      upcomingMovies={upcomingMovies}
+                      isLoading={isUpcomingLoading}
+                      error={upcomingError}
+                      subscribedIds={subscribedIdSet}
+                      effectiveEmail={effectiveEmail}
+                      isAdmin={isAdmin}
+                      onRetry={() => void retryUpcoming()}
+                      onSubscribe={async (release: UpcomingMovie, email?: string) => {
+                        const res = await subscribeToRelease(release, email);
+                        showNotice(`Release alert enabled for "${release.title}" (${res.email}).`);
+                      }}
+                      onUnsubscribe={async (release: UpcomingMovie) => {
+                        await unsubscribeFromRelease(release);
+                        showNotice(`Release alert removed for "${release.title}".`);
+                      }}
+                      onSubscribeAll={async (email?: string) => {
+                        const res = await subscribeToAllUpcoming(email);
+                        showNotice(`Subscribed ${res.email} to ${res.count} upcoming release alerts.`);
+                      }}
+                      onCreateUpcoming={async (input) => {
+                        const created = await createUpcomingRelease(input);
+                        showNotice(`Scheduled "${created.title}" in Coming Soon.`);
+                      }}
+                      onDeleteUpcoming={async (releaseId) => {
+                        await deleteUpcomingRelease(releaseId);
+                        showNotice('Removed upcoming release.');
+                      }}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
 
                 {/* 7. Bottom of Homepage App Install Banner */}
                 <PWAInstallButton variant="home-banner" />
@@ -1640,35 +1796,45 @@ export default function App() {
         )}
 
         {mainView === 'search' && (
-          <SearchPage
-            movies={movies}
-            isOffline={isOffline}
-            searchQuery={searchQuery}
-            selectedGenre={selectedGenre}
-            selectedQuality={selectedQuality}
-            sortBy={searchSort}
-            savedMovieIds={savedMovieIds}
-            downloadedMovieIds={downloadedMovieIds}
-            ratingsByMovie={ratingsByMovie}
-            reviewCountByMovie={reviewCountByMovie}
-            progressByMovie={progressByMovie}
-            onSearchChange={setSearchQuery}
-            onSelectGenre={setSelectedGenre}
-            onSelectQuality={setSelectedQuality}
-            onChangeSortBy={setSearchSort}
-            onBackHome={() => navigateToView('home', 'spotlight')}
-            onOpenDownloads={() => {
-              setCollectionView('all');
-              setSelectedGenre('All');
-              setCatalogSort('downloads');
-              navigateToView('downloads', 'catalog');
-            }}
-            onSelectMovie={(m) => handleOpenMovie(m, false)}
-            onPlayTrailer={(m) => handleOpenMovie(m, true)}
-            onDownload={handleDownloadMovie}
-            onToggleSave={handleToggleSave}
-            onShareToChat={handleShareToChat}
-          />
+          <ErrorBoundary sectionName="Search">
+            <Suspense
+              fallback={
+                <div className="mx-auto max-w-[1440px] px-4 py-10 sm:px-6 lg:px-8 text-xs text-[#A1A1AA]">
+                  Loading search catalog...
+                </div>
+              }
+            >
+              <SearchPage
+                movies={movies}
+                isOffline={isOffline}
+                searchQuery={searchQuery}
+                selectedGenre={selectedGenre}
+                selectedQuality={selectedQuality}
+                sortBy={searchSort}
+                savedMovieIds={savedMovieIds}
+                downloadedMovieIds={downloadedMovieIds}
+                ratingsByMovie={ratingsByMovie}
+                reviewCountByMovie={reviewCountByMovie}
+                progressByMovie={progressByMovie}
+                onSearchChange={setSearchQuery}
+                onSelectGenre={setSelectedGenre}
+                onSelectQuality={setSelectedQuality}
+                onChangeSortBy={setSearchSort}
+                onBackHome={() => navigateToView('home', 'spotlight')}
+                onOpenDownloads={() => {
+                  setCollectionView('all');
+                  setSelectedGenre('All');
+                  setCatalogSort('downloads');
+                  navigateToView('downloads', 'catalog');
+                }}
+                onSelectMovie={handleOpenMovieDirect}
+                onPlayTrailer={handleOpenMovieTrailer}
+                onDownload={handleDownloadMovie}
+                onToggleSave={handleToggleSave}
+                onShareToChat={handleShareToChat}
+              />
+            </Suspense>
+          </ErrorBoundary>
         )}
 
         {mainView === 'downloads' && (
@@ -1700,14 +1866,18 @@ export default function App() {
               </div>
             </div>
 
-            <DownloadsManagerPanel
-              tasks={downloadManager.tasks}
-              storageUsedBytes={downloadManager.storageUsedBytes}
-              onPause={downloadManager.pauseDownload}
-              onResume={downloadManager.resumeDownload}
-              onRemove={(id) => void downloadManager.removeDownload(id)}
-              onOpenMovieById={handleOpenById}
-            />
+            <ErrorBoundary sectionName="Downloads" compact>
+              <Suspense fallback={null}>
+                <DownloadsManagerPanel
+                  tasks={downloadManager.tasks}
+                  storageUsedBytes={downloadManager.storageUsedBytes}
+                  onPause={downloadManager.pauseDownload}
+                  onResume={downloadManager.resumeDownload}
+                  onRemove={(id) => void downloadManager.removeDownload(id)}
+                  onOpenMovieById={handleOpenById}
+                />
+              </Suspense>
+            </ErrorBoundary>
 
             <MovieGrid
               movies={movies}
@@ -1727,9 +1897,9 @@ export default function App() {
               isAdmin={isAdmin}
               onChangeCollectionView={handleSelectCollection}
               onDownload={handleDownloadMovie}
-              onSelectMovie={(m) => handleOpenMovie(m, false)}
-              onPlayTrailer={(m) => handleOpenMovie(m, true)}
-              onOpenRequestMovie={() => setIsRequestModalOpen(true)}
+              onSelectMovie={handleOpenMovieDirect}
+              onPlayTrailer={handleOpenMovieTrailer}
+              onOpenRequestMovie={handleOpenRequestModal}
               onShareToChat={handleShareToChat}
               onToggleSave={handleToggleSave}
               onOpenUpload={handleOpenUpload}
@@ -1738,20 +1908,22 @@ export default function App() {
         )}
 
         {mainView === 'games' && (
-          <Suspense
-            fallback={
-              <div className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8 text-xs text-[#A1A1AA]">
-                Loading Temple Football 3D Arena...
-              </div>
-            }
-          >
-            <GamesHub
-              defaultPlayerId={activeUserId}
-              defaultPlayerName={activeUsername}
-              onBackToCinema={() => navigateToView('home', 'spotlight')}
-              onOpenChessLounge={() => navigateToView('lounge', 'chess-game')}
-            />
-          </Suspense>
+          <ErrorBoundary sectionName="Temple Football 3D Arena">
+            <Suspense
+              fallback={
+                <div className="mx-auto max-w-[1440px] px-4 py-12 sm:px-6 lg:px-8 text-xs text-[#A1A1AA]">
+                  Loading Temple Football 3D Arena...
+                </div>
+              }
+            >
+              <GamesHub
+                defaultPlayerId={activeUserId}
+                defaultPlayerName={activeUsername}
+                onBackToCinema={() => navigateToView('home', 'spotlight')}
+                onOpenChessLounge={() => navigateToView('lounge', 'chess-game')}
+              />
+            </Suspense>
+          </ErrorBoundary>
         )}
 
         {mainView === 'lounge' && (
@@ -1799,6 +1971,13 @@ export default function App() {
                   ))}
                   <button
                     type="button"
+                    onClick={() => navigateToView('lounge', 'ai-transcribe')}
+                    className="min-h-[44px] inline-flex items-center rounded-xl border border-[#27272A] bg-[#111114] px-4 py-2 text-xs font-semibold text-[#D4D4D8] hover:border-[#E6A93C] hover:text-[#E6A93C] whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                  >
+                    Audio Transcribe
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setIsWatchPartyOpen(true)}
                     className="min-h-[44px] inline-flex items-center rounded-xl border border-[#E6A93C]/50 bg-[#E6A93C]/10 px-4 py-2 text-xs font-semibold text-[#E6A93C] hover:bg-[#E6A93C]/20 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                   >
@@ -1812,23 +1991,28 @@ export default function App() {
             <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start min-w-0">
                 <div className="lg:col-span-7 min-w-0">
-                  <CommunityChat
-                    messages={messages}
-                    onlineUsers={onlineUsers}
-                    isConnected={isConnected}
-                    username={activeUsername}
-                    userId={activeUserId}
-                    activeRoom={activeRoom}
-                    pendingMovieRef={pendingMovieRef}
-                    movies={movies}
-                    onSwitchRoom={handleSwitchRoom}
-                    onRenameUser={handleRenameUser}
-                    onSendMessage={handleSendMessage}
-                    onToggleLikeMessage={handleToggleLikeMessage}
-                    onClearPendingMovie={() => setPendingMovieRef(null)}
-                    onOpenMovieById={handleOpenById}
-                    onDownloadMovieById={handleDownloadById}
-                  />
+                  <ErrorBoundary sectionName="Community Chat" compact>
+                    <Suspense fallback={null}>
+                      <CommunityChat
+                        messages={messages}
+                        onlineUsers={onlineUsers}
+                        isConnected={isConnected}
+                        username={activeUsername}
+                        userId={activeUserId}
+                        activeRoom={activeRoom}
+                        pendingMovieRef={pendingMovieRef}
+                        movies={movies}
+                        onSwitchRoom={handleSwitchRoom}
+                        onRenameUser={handleRenameUser}
+                        onSendMessage={handleSendMessage}
+                        onToggleLikeMessage={handleToggleLikeMessage}
+                        onToggleReaction={handleToggleReaction}
+                        onClearPendingMovie={() => setPendingMovieRef(null)}
+                        onOpenMovieById={handleOpenById}
+                        onDownloadMovieById={handleDownloadById}
+                      />
+                    </Suspense>
+                  </ErrorBoundary>
                 </div>
 
                 <div className="lg:col-span-5 min-w-0">
@@ -1914,26 +2098,40 @@ export default function App() {
                 </div>
               }
             >
-              <ChessLounge
-                userId={activeUserId}
-                username={activeUsername}
-                isWsConnected={isConnected}
-                onlineUsers={onlineUsers}
-                chessRoom={chessRoom}
-                chessRooms={chessRooms}
-                chessError={chessError}
-                onClearChessError={() => setChessError(null)}
-                sendWs={sendWs}
-              />
-              <CinemaStage3D />
-              <CinemaLocationsMap />
-              <CinemaAIStudio />
+              <ErrorBoundary sectionName="Chess Lounge" compact>
+                <ChessLounge
+                  userId={activeUserId}
+                  username={activeUsername}
+                  isWsConnected={isConnected}
+                  onlineUsers={onlineUsers}
+                  chessRoom={chessRoom}
+                  chessRooms={chessRooms}
+                  chessError={chessError}
+                  onClearChessError={() => setChessError(null)}
+                  sendWs={sendWs}
+                />
+              </ErrorBoundary>
+              <ErrorBoundary sectionName="Cinema 3D Stage" compact>
+                <CinemaStage3D />
+              </ErrorBoundary>
+              <ErrorBoundary sectionName="Cinema Locations Map" compact>
+                <CinemaLocationsMap />
+              </ErrorBoundary>
+              <ErrorBoundary sectionName="Cinema AI Studio & Audio Transcribe" compact>
+                <CinemaAIStudio />
+              </ErrorBoundary>
             </Suspense>
           </div>
         )}
       </main>
 
-      <footer className="border-t border-[#27272A] bg-[#0A0A0C] pb-20 lg:pb-0">
+      <footer
+        className={`border-t border-[#27272A] bg-[#0A0A0C] ${
+          currentTrack && !isMiniDismissed
+            ? 'pb-[calc(9.5rem+env(safe-area-inset-bottom))] lg:pb-20'
+            : 'pb-[calc(5rem+env(safe-area-inset-bottom))] lg:pb-0'
+        }`}
+      >
         <div className="mx-auto flex max-w-[1440px] flex-col sm:flex-row items-center justify-between gap-4 px-4 py-6 sm:px-6 lg:px-8 text-xs text-[#71717A]">
           <div className="flex items-center gap-2.5 text-[#A1A1AA]">
             <TempleLogoIcon className="h-7 w-7 shrink-0" />
@@ -2035,7 +2233,8 @@ export default function App() {
         </div>
       </footer>
 
-      <Suspense fallback={null}>
+      <ErrorBoundary sectionName="Cinema Dialogs" compact>
+        <Suspense fallback={null}>
         {authModalState.open && (
           <AuthModal
             isOpen={authModalState.open}
@@ -2085,11 +2284,20 @@ export default function App() {
             reviews={reviewsByMovie[selectedMovie.id] || []}
             isLoadingReviews={isLoadingReviews}
             savedProgress={progressByMovie[selectedMovie.id]}
+            isInWatchHistory={Boolean(
+              progressByMovie[selectedMovie.id] || watchedIds.includes(selectedMovie.id)
+            )}
+            isOffline={isOffline}
+            isPendingRatingSync={Boolean(pendingRatingsByMovie[selectedMovie.id])}
             isLowNetwork={isLowNetwork}
             videoQuality={settings.videoQuality}
             downloadQuality={settings.downloadQuality}
             onSaveProgress={(id, pos, dur) => void saveProgress(id, pos, dur)}
             onClearProgress={(id) => void clearProgress(id)}
+            onClearReadHistory={(id) => {
+              handleRemoveWatchHistory(id);
+              showNotice(`Removed "${selectedMovie.title}" from Continue Watching.`);
+            }}
             onClose={() => {
               setSelectedMovie(null);
               setSelectedMovieInitialTrailer(false);
@@ -2201,6 +2409,9 @@ export default function App() {
           />
         )}
       </Suspense>
+      </ErrorBoundary>
+
+      <MusicPlayerBar />
 
       <BottomNavBar
         activeTab={mobileNavTab}

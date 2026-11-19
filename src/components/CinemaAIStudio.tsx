@@ -44,7 +44,29 @@ const LIVE_VOICES = ['Zephyr', 'Kore', 'Puck', 'Charon', 'Fenrir'] as const;
 export function CinemaAIStudio() {
   const { t } = useLanguage();
   const { setBusyActivity } = usePWAInstall();
-  const [activeTab, setActiveTab] = useState<StudioTab>('chat');
+  const [activeTab, setActiveTab] = useState<StudioTab>(() =>
+    typeof window !== 'undefined' && window.location.hash === '#ai-transcribe' ? 'transcribe' : 'chat'
+  );
+
+  useEffect(() => {
+    const onSwitchTab = (e: Event) => {
+      const detail = (e as CustomEvent<StudioTab>).detail;
+      if (detail === 'chat' || detail === 'voice' || detail === 'transcribe') {
+        setActiveTab(detail);
+      }
+    };
+    const onHashChange = () => {
+      if (window.location.hash === '#ai-transcribe') {
+        setActiveTab('transcribe');
+      }
+    };
+    window.addEventListener('temple-open-ai-tab', onSwitchTab);
+    window.addEventListener('hashchange', onHashChange);
+    return () => {
+      window.removeEventListener('temple-open-ai-tab', onSwitchTab);
+      window.removeEventListener('hashchange', onHashChange);
+    };
+  }, []);
 
   // --- Tab 1: Search Grounded Chat ---
   const [chatHistory, setChatHistory] = useState<GeminiChatEntry[]>([
@@ -375,20 +397,35 @@ export function CinemaAIStudio() {
   const recordedChunksRef = useRef<Blob[]>([]);
 
   const transcribeFileOrBlob = async (blob: Blob, filename: string) => {
+    if (!blob || blob.size === 0) {
+      setTranscribeError('Selected audio file is empty (0 bytes).');
+      return;
+    }
     setTranscribing(true);
     setTranscribeError(null);
     try {
       const formData = new FormData();
-      formData.append('audio', blob, filename);
+      formData.append('audio', blob, filename || 'audio-clip.webm');
       const res = await fetch('/api/ai/transcribe', {
         method: 'POST',
         body: formData,
       });
-      const data = (await res.json()) as { transcript?: string; error?: string };
-      if (!res.ok) {
-        throw new Error(data.error || 'Transcription failed.');
+      const rawText = await res.text();
+      let data: { transcript?: string; error?: string } = {};
+      try {
+        data = rawText ? (JSON.parse(rawText) as { transcript?: string; error?: string }) : {};
+      } catch {
+        data = {
+          error:
+            res.status === 413
+              ? 'Audio file exceeds the 50 MB transcription limit.'
+              : `Server error (${res.status}) while transcribing audio.`,
+        };
       }
-      setTranscript(data.transcript || '(No speech detected in audio.)');
+      if (!res.ok) {
+        throw new Error(data.error || `Transcription failed (HTTP ${res.status}).`);
+      }
+      setTranscript(data.transcript?.trim() || '(No speech detected in audio.)');
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Unable to transcribe audio.');
     } finally {
@@ -399,25 +436,52 @@ export function CinemaAIStudio() {
   const handleStartClipRecording = async () => {
     setTranscribeError(null);
     try {
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+        throw new Error('Audio recording is not supported on this browser. You can still upload an audio file.');
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const preferredMimes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+      const chosenMime =
+        typeof MediaRecorder.isTypeSupported === 'function'
+          ? preferredMimes.find((m) => MediaRecorder.isTypeSupported(m))
+          : undefined;
+      const recorder = chosenMime
+        ? new MediaRecorder(stream, { mimeType: chosenMime })
+        : new MediaRecorder(stream);
+
       recordedChunksRef.current = [];
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+        if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+
+      recorder.onerror = () => {
+        for (const track of stream.getTracks()) track.stop();
+        setIsRecordingClip(false);
+        setTranscribeError('Microphone recording encountered an error.');
       };
 
       recorder.onstop = () => {
         for (const track of stream.getTracks()) track.stop();
-        const mime = recorder.mimeType || 'audio/webm';
+        const mime = recorder.mimeType || chosenMime || 'audio/webm';
+        const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
         const blob = new Blob(recordedChunksRef.current, { type: mime });
-        const recordedFile = new File([blob], `mic-clip-${Date.now()}.webm`, { type: mime });
+        if (blob.size === 0) {
+          setTranscribeError('No audio was captured. Please hold record for at least 1 second.');
+          return;
+        }
+        const recordedFile = new File([blob], `mic-clip-${Date.now()}.${ext}`, { type: mime });
         setSelectedAudioFile(recordedFile);
         void transcribeFileOrBlob(blob, recordedFile.name);
       };
 
-      recorder.start();
+      recorder.start(250);
       setIsRecordingClip(true);
     } catch (err) {
       setTranscribeError(
@@ -614,7 +678,7 @@ export function CinemaAIStudio() {
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 placeholder="Ask anything — grounded with live Google Search data..."
-                className="flex-1 rounded-lg border border-[#27272A] bg-[#09090B] px-3.5 py-2.5 text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
+                className="flex-1 rounded-lg border border-[#27272A] bg-[#09090B] px-3.5 py-2.5 text-base sm:text-sm text-[#FAFAFA] placeholder:text-[#71717A] focus:border-[#E5A93B] focus:outline-none"
               />
               <button
                 type="submit"
@@ -787,15 +851,16 @@ export function CinemaAIStudio() {
                     </button>
                   )}
 
-                  <label className="inline-flex items-center gap-2 rounded-lg border border-[#27272A] bg-[#18181B] px-3.5 py-2 text-xs font-medium text-[#FAFAFA] hover:border-[#3F3F46] cursor-pointer">
+                  <label className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-[#27272A] bg-[#18181B] px-3.5 py-2 text-xs font-medium text-[#FAFAFA] hover:border-[#3F3F46] cursor-pointer">
                     <Upload className="h-3.5 w-3.5 text-[#E5A93B]" aria-hidden="true" />
                     <span>Choose Audio File</span>
                     <input
                       type="file"
-                      accept="audio/*"
+                      accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.opus,.flac,.webm,.mp4,.wma,.amr,.3gp,.mkv,.mov,.avi"
                       className="hidden"
                       onChange={(e) => {
                         const file = e.target.files?.[0];
+                        e.currentTarget.value = '';
                         if (file) {
                           setSelectedAudioFile(file);
                           void transcribeFileOrBlob(file, file.name);
@@ -807,7 +872,12 @@ export function CinemaAIStudio() {
 
                 {selectedAudioFile && (
                   <div className="rounded-lg border border-[#27272A] bg-[#141418] px-3 py-2 text-xs flex items-center justify-between gap-2">
-                    <span className="truncate text-[#D4D4D8]">{selectedAudioFile.name}</span>
+                    <span className="truncate text-[#D4D4D8]">
+                      {selectedAudioFile.name}{' '}
+                      <span className="text-[#71717A]">
+                        ({(selectedAudioFile.size / (1024 * 1024)).toFixed(2)} MB)
+                      </span>
+                    </span>
                     <button
                       type="button"
                       disabled={transcribing}

@@ -10,6 +10,7 @@ import zlib from 'zlib';
 import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
 import { attachFootballServer } from './server/footballSocket.ts';
+import { attachMusicRoutes } from './server/musicRoutes.ts';
 import { GoogleGenAI, Modality, type LiveServerMessage } from '@google/genai';
 import type {
   BrokenLinkReport,
@@ -209,7 +210,57 @@ function loadDatabase(): DatabaseState {
   };
 }
 
+interface SerializedJsonCacheEntry {
+  json: Buffer;
+  gzip: Buffer;
+  br: Buffer;
+}
+
+let cachedMoviesPayload: SerializedJsonCacheEntry | null = null;
+let cachedUpcomingPayload: SerializedJsonCacheEntry | null = null;
+
+function invalidateCatalogCache() {
+  cachedMoviesPayload = null;
+  cachedUpcomingPayload = null;
+}
+
+function buildSerializedJsonCache(payload: unknown): SerializedJsonCacheEntry {
+  const json = Buffer.from(JSON.stringify(payload), 'utf-8');
+  return {
+    json,
+    gzip: zlib.gzipSync(json, { level: 1 }),
+    br: zlib.brotliCompressSync(json, {
+      params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
+    }),
+  };
+}
+
+function sendCachedJsonEntry(
+  req: express.Request,
+  res: express.Response,
+  entry: SerializedJsonCacheEntry
+) {
+  const accept = String(req.headers['accept-encoding'] || '');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Vary', 'Accept-Encoding');
+  if (accept.includes('gzip')) {
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Content-Length', String(entry.gzip.length));
+    res.send(entry.gzip);
+    return;
+  }
+  if (accept.includes('br')) {
+    res.setHeader('Content-Encoding', 'br');
+    res.setHeader('Content-Length', String(entry.br.length));
+    res.send(entry.br);
+    return;
+  }
+  res.setHeader('Content-Length', String(entry.json.length));
+  res.send(entry.json);
+}
+
 function saveDatabase(state: DatabaseState) {
+  invalidateCatalogCache();
   const tempPath = `${DB_PATH}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(state, null, 2), 'utf-8');
   fs.renameSync(tempPath, DB_PATH);
@@ -933,7 +984,7 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Authorization, Content-Type, Range, X-Unique-Upload-Id'
+      'Authorization, Content-Type, Range, X-Unique-Upload-Id, X-Spotify-Session'
     );
     res.setHeader('Access-Control-Expose-Headers', 'Content-Range, X-Download-Quality');
     res.setHeader('Access-Control-Max-Age', '86400');
@@ -948,7 +999,7 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  // Compress GET JSON responses with Brotli or Gzip for fast loading on slow networks
+  // Compress GET JSON responses quickly without blocking the Node event loop
   app.use((req, res, next) => {
     if (req.method !== 'GET') {
       next();
@@ -959,17 +1010,19 @@ async function startServer() {
       const jsonStr = JSON.stringify(body);
       const accept = String(req.headers['accept-encoding'] || '');
       if (jsonStr.length > 1024 && !res.headersSent) {
-        if (accept.includes('br')) {
-          const compressed = zlib.brotliCompressSync(jsonStr);
-          res.setHeader('Content-Encoding', 'br');
+        if (accept.includes('gzip')) {
+          const compressed = zlib.gzipSync(jsonStr, { level: 1 });
+          res.setHeader('Content-Encoding', 'gzip');
           res.setHeader('Vary', 'Accept-Encoding');
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.setHeader('Content-Length', String(compressed.length));
           return res.send(compressed);
         }
-        if (accept.includes('gzip')) {
-          const compressed = zlib.gzipSync(jsonStr);
-          res.setHeader('Content-Encoding', 'gzip');
+        if (accept.includes('br')) {
+          const compressed = zlib.brotliCompressSync(jsonStr, {
+            params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
+          });
+          res.setHeader('Content-Encoding', 'br');
           res.setHeader('Vary', 'Accept-Encoding');
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.setHeader('Content-Length', String(compressed.length));
@@ -1040,6 +1093,7 @@ async function startServer() {
   });
 
   attachFootballServer(app, server, STORAGE_DIR);
+  attachMusicRoutes(app);
 
   interface ConnectedClient {
     ws: WebSocket;
@@ -1252,6 +1306,7 @@ async function startServer() {
             timestamp: new Date().toISOString(),
             movieRef: data.movieRef,
             likedBy: [],
+            reactions: {},
           };
 
           db.messages.push(message);
@@ -1279,6 +1334,35 @@ async function startServer() {
             type: 'chat:like_updated',
             messageId: target.id,
             likedBy: target.likedBy,
+          });
+        } else if (data.type === 'chat:react') {
+          const messageId = String(data.messageId || '').trim();
+          const actorId = (client.userId || String(data.userId || '')).trim().slice(0, 64);
+          const emoji = String(data.emoji || '').trim();
+          if (!messageId || !actorId || !emoji || emoji.length > 16 || /\s/.test(emoji)) return;
+
+          const target = db.messages.find((m) => m.id === messageId);
+          if (!target) return;
+
+          const nextReactions: Record<string, string[]> = { ...(target.reactions || {}) };
+          const currentReactors = Array.isArray(nextReactions[emoji]) ? nextReactions[emoji] : [];
+          if (currentReactors.includes(actorId)) {
+            const filtered = currentReactors.filter((id) => id !== actorId);
+            if (filtered.length > 0) {
+              nextReactions[emoji] = filtered;
+            } else {
+              delete nextReactions[emoji];
+            }
+          } else {
+            nextReactions[emoji] = [...currentReactors, actorId];
+          }
+          target.reactions = nextReactions;
+
+          saveDatabase(db);
+          broadcast({
+            type: 'chat:reaction_updated',
+            messageId: target.id,
+            reactions: target.reactions,
           });
         } else if (data.type === 'party:join') {
           const roomCode = String(data.roomCode || '')
@@ -1524,18 +1608,37 @@ async function startServer() {
   });
 
   const MAX_MOVIE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
-  const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov|m4v)$/i;
+  const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov|m4v|3gp|avi|mpeg|mpg|ts|flv|wmv)$/i;
   const ALLOWED_VIDEO_MIMES = new Set([
     'video/mp4',
     'video/webm',
     'video/x-matroska',
     'video/matroska',
+    'application/x-matroska',
+    'application/mp4',
     'video/quicktime',
     'video/3gpp',
+    'video/3gpp2',
     'video/x-m4v',
+    'video/x-msvideo',
+    'video/avi',
+    'video/mpeg',
+    'video/mp2t',
+    'video/x-flv',
+    'video/x-ms-wmv',
   ]);
-  const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp)$/i;
-  const ALLOWED_POSTER_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+  const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i;
+  const ALLOWED_POSTER_MIMES = new Set([
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+    'image/bmp',
+    'image/avif',
+    'image/heic',
+    'image/heif',
+  ]);
 
   function isValidVideoUpload(fileName: string, mimeType: string): boolean {
     const mime = (mimeType || '').toLowerCase();
@@ -1575,7 +1678,7 @@ async function startServer() {
     fileFilter: (_req, file, cb) => {
       if (file.fieldname === 'video') {
         if (!isValidVideoUpload(file.originalname, file.mimetype)) {
-          const err = new Error('Please choose a video file (MP4, WEBM, MKV, or MOV).') as Error & {
+          const err = new Error('Please choose a video file (MP4, WEBM, MKV, MOV, M4V, 3GP, or AVI).') as Error & {
             status?: number;
           };
           err.status = 400;
@@ -1584,8 +1687,8 @@ async function startServer() {
         }
       } else if (file.fieldname === 'poster') {
         const mime = (file.mimetype || '').toLowerCase();
-        if (!ALLOWED_POSTER_MIMES.has(mime) && !ALLOWED_POSTER_EXTS.test(file.originalname || '')) {
-          const err = new Error('Poster must be a JPG, PNG, or WEBP image.') as Error & {
+        if (!mime.startsWith('image/') && !ALLOWED_POSTER_MIMES.has(mime) && !ALLOWED_POSTER_EXTS.test(file.originalname || '')) {
+          const err = new Error('Poster must be an image file (JPG, PNG, WEBP, GIF, AVIF, or HEIC).') as Error & {
             status?: number;
           };
           err.status = 400;
@@ -1873,8 +1976,11 @@ async function startServer() {
     }
   });
 
-  app.get('/api/movies', (_req, res) => {
-    res.json({ movies: db.movies });
+  app.get('/api/movies', (req, res) => {
+    if (!cachedMoviesPayload) {
+      cachedMoviesPayload = buildSerializedJsonCache({ movies: db.movies });
+    }
+    sendCachedJsonEntry(req, res, cachedMoviesPayload);
   });
 
   app.post(
@@ -2409,6 +2515,7 @@ async function startServer() {
       timestamp: new Date().toISOString(),
       ...(movieRef ? { movieRef } : {}),
       likedBy: [],
+      reactions: {},
     };
 
     db.messages.push(message);
@@ -2453,6 +2560,48 @@ async function startServer() {
     res.json({ ok: true, messageId: target.id, likedBy: target.likedBy });
   });
 
+  app.post('/api/chat/messages/:id/react', (req, res) => {
+    const messageId = String(req.params.id || '').trim();
+    const actorId = String(req.body?.userId || '').trim().slice(0, 64);
+    const emoji = String(req.body?.emoji || '').trim();
+    if (!actorId) {
+      res.status(400).json({ error: 'User ID is required to react to a message.' });
+      return;
+    }
+    if (!emoji || emoji.length > 16 || /\s/.test(emoji)) {
+      res.status(400).json({ error: 'Valid emoji reaction is required.' });
+      return;
+    }
+
+    const target = db.messages.find((m) => m.id === messageId);
+    if (!target) {
+      res.status(404).json({ error: 'Message not found.' });
+      return;
+    }
+
+    const nextReactions: Record<string, string[]> = { ...(target.reactions || {}) };
+    const currentReactors = Array.isArray(nextReactions[emoji]) ? nextReactions[emoji] : [];
+    if (currentReactors.includes(actorId)) {
+      const filtered = currentReactors.filter((id) => id !== actorId);
+      if (filtered.length > 0) {
+        nextReactions[emoji] = filtered;
+      } else {
+        delete nextReactions[emoji];
+      }
+    } else {
+      nextReactions[emoji] = [...currentReactors, actorId];
+    }
+    target.reactions = nextReactions;
+
+    saveDatabase(db);
+    broadcast({
+      type: 'chat:reaction_updated',
+      messageId: target.id,
+      reactions: target.reactions,
+    });
+    res.json({ ok: true, messageId: target.id, reactions: target.reactions });
+  });
+
   function computeSubscriberCount(upcoming: StoredUpcomingMovie): number {
     const activeSubs = db.releaseSubscriptions.filter(
       (s) => s.releaseId === upcoming.id
@@ -2478,11 +2627,14 @@ async function startServer() {
 
   const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  app.get('/api/upcoming', (_req, res) => {
-    const sorted = [...db.upcomingMovies]
-      .sort((a, b) => a.releaseDate.localeCompare(b.releaseDate))
-      .map(toPublicUpcoming);
-    res.json({ upcoming: sorted });
+  app.get('/api/upcoming', (req, res) => {
+    if (!cachedUpcomingPayload) {
+      const sorted = [...db.upcomingMovies]
+        .sort((a, b) => a.releaseDate.localeCompare(b.releaseDate))
+        .map(toPublicUpcoming);
+      cachedUpcomingPayload = buildSerializedJsonCache({ upcoming: sorted });
+    }
+    sendCachedJsonEntry(req, res, cachedUpcomingPayload);
   });
 
   app.post('/api/upcoming/notify-all', async (req, res) => {
@@ -2576,53 +2728,61 @@ async function startServer() {
     requireAdmin,
     upload.single('poster'),
     async (req, res) => {
-      const title = String(req.body?.title || '').trim().slice(0, 140);
-      if (!title) {
-        if (req.file) fs.unlinkSync(req.file.path);
-        res.status(400).json({ error: 'Title is required.' });
-        return;
+      try {
+        const title = String(req.body?.title || '').trim().slice(0, 140);
+        if (!title) {
+          if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+          res.status(400).json({ error: 'Title is required.' });
+          return;
+        }
+
+        const rawGenre = String(req.body?.genre || 'Drama') as MovieGenre;
+        const genre: MovieGenre = VALID_GENRES.includes(rawGenre) ? rawGenre : 'Drama';
+        const rawQuality = String(req.body?.quality || '4K UHD') as MovieQuality;
+        const quality: MovieQuality = VALID_QUALITIES.includes(rawQuality) ? rawQuality : '4K UHD';
+        const rawDate = String(req.body?.releaseDate || '').trim();
+        const releaseDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+          ? rawDate
+          : new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+        const duration = String(req.body?.duration || '2h 00m').trim().slice(0, 24) || '2h 00m';
+        const director = String(req.body?.director || 'TempleSolo Studio').trim().slice(0, 80) || 'TempleSolo Studio';
+        const synopsis =
+          String(req.body?.synopsis || '').trim().slice(0, 1000) ||
+          `${title} is scheduled to arrive in the templesolosmovies.com vault on ${releaseDate}.`;
+
+        let posterUrl = '/storage/posters/upcoming_glass_monsoon.jpg';
+        if (req.file) {
+          const optimizedPath = await compressPosterImage(req.file.path, 540);
+          posterUrl = `/storage/posters/${path.basename(optimizedPath)}`;
+        }
+
+        const created: StoredUpcomingMovie = {
+          id: `upcoming-${randomUUID().slice(0, 8)}`,
+          title,
+          genre,
+          releaseDate,
+          duration,
+          quality,
+          director,
+          synopsis,
+          posterUrl,
+          baseSubscribers: 1,
+          createdAt: new Date().toISOString(),
+        };
+
+        db.upcomingMovies.push(created);
+        saveDatabase(db);
+
+        const publicItem = toPublicUpcoming(created);
+        broadcast({ type: 'upcoming:created', upcoming: publicItem });
+        res.status(201).json({ upcoming: publicItem });
+      } catch (err) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        console.error('[Upcoming Error] Failed to create upcoming release:', err);
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'Failed to create upcoming release.',
+        });
       }
-
-      const rawGenre = String(req.body?.genre || 'Drama') as MovieGenre;
-      const genre: MovieGenre = VALID_GENRES.includes(rawGenre) ? rawGenre : 'Drama';
-      const rawQuality = String(req.body?.quality || '4K UHD') as MovieQuality;
-      const quality: MovieQuality = VALID_QUALITIES.includes(rawQuality) ? rawQuality : '4K UHD';
-      const rawDate = String(req.body?.releaseDate || '').trim();
-      const releaseDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
-        ? rawDate
-        : new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
-      const duration = String(req.body?.duration || '2h 00m').trim().slice(0, 24) || '2h 00m';
-      const director = String(req.body?.director || 'TempleSolo Studio').trim().slice(0, 80) || 'TempleSolo Studio';
-      const synopsis =
-        String(req.body?.synopsis || '').trim().slice(0, 1000) ||
-        `${title} is scheduled to arrive in the templesolosmovies.com vault on ${releaseDate}.`;
-
-      let posterUrl = '/storage/posters/upcoming_glass_monsoon.jpg';
-      if (req.file) {
-        const optimizedPath = await compressPosterImage(req.file.path, 540);
-        posterUrl = `/storage/posters/${path.basename(optimizedPath)}`;
-      }
-
-      const created: StoredUpcomingMovie = {
-        id: `upcoming-${randomUUID().slice(0, 8)}`,
-        title,
-        genre,
-        releaseDate,
-        duration,
-        quality,
-        director,
-        synopsis,
-        posterUrl,
-        baseSubscribers: 1,
-        createdAt: new Date().toISOString(),
-      };
-
-      db.upcomingMovies.push(created);
-      saveDatabase(db);
-
-      const publicItem = toPublicUpcoming(created);
-      broadcast({ type: 'upcoming:created', upcoming: publicItem });
-      res.status(201).json({ upcoming: publicItem });
     }
   );
 
@@ -2814,8 +2974,95 @@ async function startServer() {
 
   const audioUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 25 * 1024 * 1024 },
+    limits: { fileSize: 50 * 1024 * 1024 },
   });
+
+  const AUDIO_EXT_MIME_MAP: Record<string, string> = {
+    '.mp3': 'audio/mp3',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.mp4': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg',
+    '.oga': 'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.flac': 'audio/flac',
+    '.webm': 'audio/webm',
+    '.weba': 'audio/webm',
+  };
+
+  const GEMINI_NATIVE_AUDIO_MIMES = new Set([
+    'audio/mp3',
+    'audio/mpeg',
+    'audio/wav',
+    'audio/aac',
+    'audio/ogg',
+    'audio/flac',
+    'audio/webm',
+    'audio/mp4',
+  ]);
+
+  function resolveAudioMimeType(rawMime: string | undefined, fileName: string | undefined): string {
+    const clean = (rawMime || '').split(';')[0].trim().toLowerCase();
+    const aliasMap: Record<string, string> = {
+      'audio/mpeg': 'audio/mp3',
+      'audio/mp3': 'audio/mp3',
+      'audio/x-mpeg': 'audio/mp3',
+      'audio/x-wav': 'audio/wav',
+      'audio/wave': 'audio/wav',
+      'audio/vnd.wave': 'audio/wav',
+      'audio/x-m4a': 'audio/mp4',
+      'audio/m4a': 'audio/mp4',
+      'video/mp4': 'audio/mp4',
+      'audio/x-aac': 'audio/aac',
+      'audio/opus': 'audio/ogg',
+      'video/ogg': 'audio/ogg',
+      'video/webm': 'audio/webm',
+      'audio/x-flac': 'audio/flac',
+    };
+    if (clean && aliasMap[clean]) return aliasMap[clean];
+    if (clean && clean.startsWith('audio/') && GEMINI_NATIVE_AUDIO_MIMES.has(clean)) {
+      return clean;
+    }
+    const ext = path.extname(fileName || '').toLowerCase();
+    if (ext && AUDIO_EXT_MIME_MAP[ext]) {
+      return AUDIO_EXT_MIME_MAP[ext];
+    }
+    if (clean && clean.startsWith('audio/')) return clean;
+    return 'application/octet-stream';
+  }
+
+  async function transcodeAudioBufferToMp3(inputBuffer: Buffer, fileName: string): Promise<Buffer> {
+    const ext = path.extname(fileName || '') || '.bin';
+    const id = randomUUID();
+    const inPath = path.join('/tmp', `transcribe-in-${id}${ext}`);
+    const outPath = path.join('/tmp', `transcribe-out-${id}.mp3`);
+    try {
+      fs.writeFileSync(inPath, inputBuffer);
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-loglevel',
+        'error',
+        '-i',
+        inPath,
+        '-vn',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+        '-b:a',
+        '64k',
+        outPath,
+      ]);
+      if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
+        return fs.readFileSync(outPath);
+      }
+      throw new Error('Normalized audio output was empty.');
+    } finally {
+      if (fs.existsSync(inPath)) fs.unlinkSync(inPath);
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    }
+  }
 
   app.get('/api/maps-config', (_req, res) => {
     res.json({
@@ -2922,66 +3169,99 @@ async function startServer() {
   });
 
   app.post('/api/ai/transcribe', audioUpload.single('audio'), async (req, res) => {
+    const aiV1 = getGeminiClient();
     const aiBeta = getGeminiClient('v1beta');
-    if (!aiBeta) {
+    if (!aiBeta && !aiV1) {
       res.status(503).json({
         error: 'Gemini API key is not configured on the server yet. Please check Settings > Secrets.',
       });
       return;
     }
 
-    let base64Audio = '';
-    let mimeType = 'audio/webm';
+    let rawBuffer: Buffer | null = null;
+    let rawMimeType = 'audio/webm';
+    let originalName = 'audio-clip.webm';
 
     if (req.file) {
-      base64Audio = req.file.buffer.toString('base64');
-      mimeType = req.file.mimetype || 'audio/webm';
+      rawBuffer = req.file.buffer;
+      rawMimeType = req.file.mimetype || 'audio/webm';
+      originalName = req.file.originalname || 'audio-clip.webm';
     } else if (typeof req.body?.audioBase64 === 'string' && req.body.audioBase64.trim()) {
-      base64Audio = req.body.audioBase64.trim();
-      mimeType = typeof req.body.mimeType === 'string' ? req.body.mimeType : 'audio/webm';
+      const cleanedB64 = req.body.audioBase64.trim().replace(/^data:[^;]+;base64,/, '');
+      rawBuffer = Buffer.from(cleanedB64, 'base64');
+      rawMimeType = typeof req.body.mimeType === 'string' ? req.body.mimeType : 'audio/webm';
+      originalName = typeof req.body.fileName === 'string' ? req.body.fileName : 'audio-clip.webm';
     }
 
-    if (!base64Audio) {
+    if (!rawBuffer || rawBuffer.length === 0) {
       res.status(400).json({ error: 'Please upload or record an audio clip to transcribe.' });
       return;
     }
 
-    const cleanMimeType = mimeType.split(';')[0].trim() || 'audio/webm';
+    let resolvedMime = resolveAudioMimeType(rawMimeType, originalName);
+    let payloadBuffer = rawBuffer;
+    const extLower = path.extname(originalName).toLowerCase();
+    const needsTranscode =
+      payloadBuffer.length > 8 * 1024 * 1024 ||
+      !GEMINI_NATIVE_AUDIO_MIMES.has(resolvedMime) ||
+      ['.wma', '.amr', '.3gp', '.mkv', '.mov', '.avi'].includes(extLower);
 
+    if (needsTranscode) {
+      try {
+        payloadBuffer = await transcodeAudioBufferToMp3(rawBuffer, originalName);
+        resolvedMime = 'audio/mp3';
+      } catch (ffmpegErr) {
+        if (!GEMINI_NATIVE_AUDIO_MIMES.has(resolvedMime)) {
+          res.status(400).json({
+            error:
+              ffmpegErr instanceof Error
+                ? `Unsupported audio format (${resolvedMime}): ${ffmpegErr.message}`
+                : 'Unsupported or unreadable audio file.',
+          });
+          return;
+        }
+      }
+    }
+
+    const base64Audio = payloadBuffer.toString('base64');
     const promptText =
       typeof req.body?.prompt === 'string' && req.body.prompt.trim()
         ? req.body.prompt.trim().slice(0, 500)
         : 'Transcribe this audio accurately, preserving punctuation and speaker turns if discernible.';
 
+    const clients = [aiBeta, aiV1].filter((c): c is GoogleGenAI => Boolean(c));
     const transcribeModels = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
     let lastErr: unknown = null;
 
     for (const model of transcribeModels) {
-      try {
-        const response = await aiBeta.models.generateContent({
-          model,
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: cleanMimeType,
-                  data: base64Audio,
+      for (const client of clients) {
+        try {
+          const response = await client.models.generateContent({
+            model,
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: resolvedMime,
+                    data: base64Audio,
+                  },
                 },
-              },
-              { text: promptText },
-            ],
-          },
-        });
+                { text: promptText },
+              ],
+            },
+          });
 
-        res.json({
-          transcript: response.text || '',
-        });
-        return;
-      } catch (err) {
-        lastErr = err;
-        const parsed = extractGeminiError(err);
-        if (parsed.status === 403) {
-          break;
+          res.json({
+            transcript: response.text || '',
+            model,
+          });
+          return;
+        } catch (err) {
+          lastErr = err;
+          const parsed = extractGeminiError(err);
+          if (parsed.status === 403) {
+            break;
+          }
         }
       }
     }

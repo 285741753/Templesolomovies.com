@@ -289,10 +289,10 @@ export function AdminUploadModal({
       throw new Error('Administrator sign-in required for Temple Vault Server uploads.');
     }
 
-    const DEFAULT_CHUNK = 2 * 1024 * 1024;
-    const FALLBACK_CHUNK = 768 * 1024;
+    const DEFAULT_CHUNK = 512 * 1024;
+    const FALLBACK_CHUNK = 256 * 1024;
     const preparedPoster = params.poster
-      ? await compressPosterIfNeeded(params.poster, 750 * 1024)
+      ? await compressPosterIfNeeded(params.poster, 600 * 1024, true)
       : null;
 
     class ServerHttpError extends Error {
@@ -455,53 +455,76 @@ export function AdminUploadModal({
       const uploadId = initJson.uploadId;
 
       try {
-        for (let i = 0; i < totalChunks; i += 1) {
-          if (params.signal.aborted) throw new Error('Upload cancelled.');
-          const chunkBlob = params.video.slice(
-            i * chunkSize,
-            Math.min(params.video.size, (i + 1) * chunkSize)
-          );
+        const partBytes = new Array<number>(totalChunks).fill(0);
+        let doneChunks = 0;
+        let nextIdx = 0;
+        let bearerToken = token;
 
-          let uploaded = false;
-          let lastErr: Error | null = null;
-          for (let attempt = 1; attempt <= 3; attempt += 1) {
-            try {
-              setUploadStatusNote(
-                attempt > 1
-                  ? `Retrying chunk ${i + 1} of ${totalChunks} (attempt ${attempt})...`
-                  : `Uploading chunk ${i + 1} of ${totalChunks}...`
-              );
-              const fd = new FormData();
-              fd.append('chunkIndex', String(i));
-              fd.append('chunk', chunkBlob, `${params.video.name}.part${i}`);
-              const freshToken = (await getIdToken(attempt > 1)) || token;
-              await sendXhr<{ received: boolean }>(
-                `/api/movies/chunked/${encodeURIComponent(uploadId)}/part?chunkIndex=${i}`,
-                fd,
-                freshToken,
-                (l, tot) => {
-                  const frac = (i + (tot > 0 ? l / tot : 0)) / totalChunks;
-                  setVideoProgress(Math.min(95, Math.round(frac * 95)));
+        const updateProgress = () => {
+          const loaded = partBytes.reduce((sum, b) => sum + b, 0);
+          const frac = params.video.size > 0 ? loaded / params.video.size : 0;
+          setVideoProgress(Math.min(95, Math.round(frac * 95)));
+        };
+
+        const worker = async () => {
+          while (true) {
+            if (params.signal.aborted) throw new Error('Upload cancelled.');
+            const i = nextIdx;
+            if (i >= totalChunks) return;
+            nextIdx += 1;
+
+            const chunkBlob = params.video.slice(
+              i * chunkSize,
+              Math.min(params.video.size, (i + 1) * chunkSize)
+            );
+
+            let uploaded = false;
+            let lastErr: Error | null = null;
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              try {
+                if (attempt > 1) {
+                  setUploadStatusNote(`Retrying chunk ${i + 1} of ${totalChunks} (attempt ${attempt})...`);
                 }
-              );
-              uploaded = true;
-              break;
-            } catch (err) {
-              if (params.signal.aborted) throw err;
-              if (err instanceof ServerHttpError && err.status === 413 && chunkSize > FALLBACK_CHUNK) {
-                throw err;
+                const fd = new FormData();
+                fd.append('chunkIndex', String(i));
+                fd.append('chunk', chunkBlob, `${params.video.name}.part${i}`);
+                await sendXhr<{ received: boolean }>(
+                  `/api/movies/chunked/${encodeURIComponent(uploadId)}/part?chunkIndex=${i}`,
+                  fd,
+                  bearerToken,
+                  (l) => {
+                    partBytes[i] = Math.min(chunkBlob.size, l);
+                    updateProgress();
+                  }
+                );
+                partBytes[i] = chunkBlob.size;
+                doneChunks += 1;
+                setUploadStatusNote(`Uploading (${doneChunks}/${totalChunks} chunks)...`);
+                updateProgress();
+                uploaded = true;
+                break;
+              } catch (err) {
+                if (params.signal.aborted) throw err;
+                if (err instanceof ServerHttpError && err.status === 413 && chunkSize > FALLBACK_CHUNK) {
+                  throw err;
+                }
+                if (err instanceof ServerHttpError && err.status === 401) {
+                  const refreshed = await getIdToken(true);
+                  if (refreshed) bearerToken = refreshed;
+                }
+                partBytes[i] = 0;
+                lastErr = err instanceof Error ? err : new Error('Chunk upload failed.');
+                await new Promise((r) => setTimeout(r, 500 * attempt));
               }
-              if (err instanceof ServerHttpError && err.status === 401 && attempt === 1) {
-                await getIdToken(true);
-              }
-              lastErr = err instanceof Error ? err : new Error('Chunk upload failed.');
-              await new Promise((r) => setTimeout(r, 700 * attempt));
+            }
+            if (!uploaded) {
+              throw lastErr || new Error(`Failed uploading chunk ${i + 1} of ${totalChunks}.`);
             }
           }
-          if (!uploaded) {
-            throw lastErr || new Error(`Failed uploading chunk ${i + 1} of ${totalChunks}.`);
-          }
-        }
+        };
+
+        const concurrency = Math.min(3, totalChunks);
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
         setUploadStatusNote('Finalizing movie on server...');
         const completeFd = new FormData();
@@ -954,9 +977,13 @@ export function AdminUploadModal({
                 <input
                   ref={posterInputRef}
                   type="file"
-                  accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                  accept="image/*"
                   className="hidden"
-                  onChange={(e) => handleSelectPoster(e.target.files?.[0])}
+                  onChange={(e) => {
+                    const selected = e.target.files?.[0];
+                    e.currentTarget.value = '';
+                    handleSelectPoster(selected);
+                  }}
                 />
 
                 <div
@@ -1026,9 +1053,13 @@ export function AdminUploadModal({
                 <input
                   ref={videoInputRef}
                   type="file"
-                  accept="video/*,.mp4,.webm,.mkv,.mov,.m4v"
+                  accept="video/*,.mp4,.webm,.mkv,.mov,.m4v,.3gp,.avi,.mpeg,.mpg,.ts"
                   className="hidden"
-                  onChange={(e) => handleSelectVideo(e.target.files?.[0])}
+                  onChange={(e) => {
+                    const selected = e.target.files?.[0];
+                    e.currentTarget.value = '';
+                    handleSelectVideo(selected);
+                  }}
                 />
 
                 {videoPreviewUrl ? (

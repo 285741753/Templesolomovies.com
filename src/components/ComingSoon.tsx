@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { isValidNotificationEmail } from '../hooks/useUpcomingNotifications';
+import { compressPosterIfNeeded, validatePosterFile } from '../services/cloudinary';
 import type { MovieGenre, MovieQuality, UpcomingMovie } from '../types/cinema';
 
 interface ComingSoonProps {
@@ -213,6 +214,15 @@ export function ComingSoon({
     setFormError(null);
     setSavingUpcoming(true);
     try {
+      let normalizedPoster: File | null = null;
+      if (formPoster) {
+        const posterErr = validatePosterFile(formPoster);
+        if (posterErr) {
+          throw new Error(posterErr);
+        }
+        normalizedPoster = await compressPosterIfNeeded(formPoster, 600 * 1024, true);
+      }
+
       await onCreateUpcoming({
         title: formTitle.trim(),
         genre: formGenre,
@@ -221,7 +231,7 @@ export function ComingSoon({
         quality: formQuality,
         director: formDirector.trim() || 'TempleSolo Studio',
         synopsis: formSynopsis.trim(),
-        posterFile: formPoster,
+        posterFile: normalizedPoster,
       });
       setIsAddModalOpen(false);
       setFormTitle('');
@@ -645,8 +655,20 @@ export function ComingSoon({
                 </label>
                 <input
                   type="file"
-                  accept="image/*"
-                  onChange={(e) => setFormPoster(e.target.files?.[0] || null)}
+                  accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.avif,.heic,.heif"
+                  onChange={(e) => {
+                    const picked = e.target.files?.[0] || null;
+                    e.currentTarget.value = '';
+                    if (picked) {
+                      const err = validatePosterFile(picked);
+                      if (err) {
+                        setFormError(err);
+                        return;
+                      }
+                      setFormError(null);
+                    }
+                    setFormPoster(picked);
+                  }}
                   className="block w-full text-xs text-[#A1A1AA] file:mr-3 file:rounded-md file:border file:border-[#27272A] file:bg-[#18181B] file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-[#FAFAFA]"
                 />
               </div>

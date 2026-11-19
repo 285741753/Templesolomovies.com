@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type TouchEvent } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react';
 import {
   Check,
   ChevronLeft,
@@ -29,7 +29,7 @@ interface HeroSpotlightProps {
 
 const SLIDE_INTERVAL_MS = 5500;
 
-export function HeroSpotlight({
+export const HeroSpotlight = memo(function HeroSpotlight({
   movies,
   totalMovies,
   totalDownloads,
@@ -97,6 +97,17 @@ export function HeroSpotlight({
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [slides.length, isPaused]);
+
+  // Preload next slide image so slide transitions render instantaneously
+  useEffect(() => {
+    if (slides.length <= 1) return;
+    const nextMovie = slides[(safeIndex + 1) % slides.length];
+    const nextSrc = nextMovie?.backdropUrl || nextMovie?.posterUrl;
+    if (!nextSrc) return;
+    const img = new Image();
+    img.referrerPolicy = 'no-referrer';
+    img.src = nextSrc;
+  }, [slides, safeIndex]);
 
   const goPrev = () => {
     if (slides.length <= 1) return;
@@ -359,4 +370,4 @@ export function HeroSpotlight({
       </div>
     </section>
   );
-}
+});

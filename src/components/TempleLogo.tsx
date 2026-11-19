@@ -4,47 +4,15 @@ interface IconProps {
 
 export function TempleLogoIcon({ className = 'h-7 w-7' }: IconProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 64 64"
-      fill="none"
+    <img
+      src="/icons/icon-192.png"
+      alt=""
       aria-hidden="true"
-      className={className}
-    >
-      <rect
-        x="1.5"
-        y="1.5"
-        width="61"
-        height="61"
-        rx="14"
-        fill="#0A0A0C"
-        stroke="#E6A93C"
-        strokeOpacity="0.38"
-        strokeWidth="1.5"
-      />
-      <path fill="#E6A93C" d="M32 10L53 21.5H11L32 10Z" />
-      <rect x="12" y="23.5" width="40" height="3.5" rx="0.75" fill="#E6A93C" />
-      <path
-        fill="#E6A93C"
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M15 28.5H23V46H15V28.5ZM17.4 31.2V33.8H20.6V31.2H17.4ZM17.4 36V38.6H20.6V36H17.4ZM17.4 40.8V43.4H20.6V40.8H17.4Z"
-      />
-      <path
-        fill="#E6A93C"
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M28 28.5H36V46H28V28.5ZM30.4 31.2V33.8H33.6V31.2H30.4ZM30.4 36V38.6H33.6V36H30.4ZM30.4 40.8V43.4H33.6V40.8H30.4Z"
-      />
-      <path
-        fill="#E6A93C"
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M41 28.5H49V46H41V28.5ZM43.4 31.2V33.8H46.6V31.2H43.4ZM43.4 36V38.6H46.6V36H43.4ZM43.4 40.8V43.4H46.6V40.8H43.4Z"
-      />
-      <rect x="12" y="47.5" width="40" height="3.5" rx="0.75" fill="#E6A93C" />
-      <rect x="9" y="52.5" width="46" height="4" rx="1" fill="#E6A93C" />
-    </svg>
+      width={64}
+      height={64}
+      decoding="async"
+      className={`${className} rounded-lg bg-black object-contain`}
+    />
   );
 }
 

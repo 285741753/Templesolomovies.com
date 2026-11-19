@@ -33,16 +33,16 @@
       "bestFreeKickScore": 620,
       "updatedAt": "2026-11-18T11:54:12.198Z"
     },
-    "smoke-1": {
-      "playerId": "smoke-1",
-      "name": "TempleTester",
-      "avatarId": "temple-crown",
+    "user-clnomatg": {
+      "playerId": "user-clnomatg",
+      "name": "Viewer131",
+      "avatarId": "crown-gold",
       "wins": 0,
       "losses": 0,
       "goals": 0,
       "saves": 0,
       "bestFreeKickScore": 0,
-      "updatedAt": "2026-11-18T11:54:16.712Z"
+      "updatedAt": "2026-11-19T20:56:36.953Z"
     }
   }
 }

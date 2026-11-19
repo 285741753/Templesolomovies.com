@@ -44,9 +44,9 @@ const GENRES: MovieGenre[] = [
 const QUALITIES: MovieQuality[] = ['4K UHD', '1080p HD', '720p HD'];
 
 const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
-const DEFAULT_CHUNK_SIZE_BYTES = 2 * 1024 * 1024; // 2 MB default chunks
-const FALLBACK_CHUNK_SIZE_BYTES = 768 * 1024; // 768 KB fallback if reverse proxy enforces 1 MB cap
-const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov|m4v)$/i;
+const DEFAULT_CHUNK_SIZE_BYTES = 512 * 1024; // 512 KB proxy-safe chunks
+const FALLBACK_CHUNK_SIZE_BYTES = 256 * 1024; // 256 KB ultra-safe fallback
+const ALLOWED_VIDEO_EXTS = /\.(mp4|webm|mkv|mov|m4v|3gp|avi|mpeg|mpg|ts|flv|wmv)$/i;
 const ALLOWED_VIDEO_MIMES = new Set([
   'video/mp4',
   'video/webm',
@@ -55,9 +55,25 @@ const ALLOWED_VIDEO_MIMES = new Set([
   'video/quicktime',
   'video/3gpp',
   'video/x-m4v',
+  'video/x-msvideo',
+  'video/avi',
+  'video/mpeg',
+  'video/mp2t',
+  'video/x-flv',
+  'video/x-ms-wmv',
 ]);
-const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp)$/i;
-const ALLOWED_POSTER_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+const ALLOWED_POSTER_EXTS = /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i;
+const ALLOWED_POSTER_MIMES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+  'image/avif',
+  'image/heic',
+  'image/heif',
+]);
 
 class StaticHostUploadError extends Error {
   constructor(message: string) {
@@ -83,7 +99,7 @@ function validateSelectedVideoFile(file: File): string | null {
   const hasValidExt = ALLOWED_VIDEO_EXTS.test(file.name || '');
   const hasValidMime = mime.startsWith('video/') || ALLOWED_VIDEO_MIMES.has(mime);
   if (!hasValidExt && !hasValidMime) {
-    return 'Please choose a video file (MP4, WEBM, MKV, MOV, or M4V).';
+    return 'Please choose a video file (MP4, WEBM, MKV, MOV, M4V, AVI, or 3GP).';
   }
   if (file.size <= 0) {
     return 'The selected video file is empty.';
@@ -97,9 +113,9 @@ function validateSelectedVideoFile(file: File): string | null {
 function validateSelectedPosterFile(file: File): string | null {
   const mime = (file.type || '').toLowerCase();
   const hasValidExt = ALLOWED_POSTER_EXTS.test(file.name || '');
-  const hasValidMime = ALLOWED_POSTER_MIMES.has(mime);
+  const hasValidMime = mime.startsWith('image/') || ALLOWED_POSTER_MIMES.has(mime);
   if (!hasValidExt && !hasValidMime) {
-    return 'Poster must be a JPG, PNG, or WEBP image file.';
+    return 'Poster must be an image file (JPG, PNG, WEBP, GIF, or AVIF).';
   }
   if (file.size > 10 * 1024 * 1024) {
     return `Poster image is too large (${formatFileSize(file.size)}). Maximum allowed is 10 MB.`;
@@ -619,7 +635,9 @@ export function UploadMovieModal({
     let createdUploadId: string | null = null;
 
     try {
-      const preparedPoster = posterFile ? await compressPosterIfNeeded(posterFile, 750 * 1024) : null;
+      const preparedPoster = posterFile
+        ? await compressPosterIfNeeded(posterFile, 600 * 1024, true)
+        : null;
 
       const runChunkedUpload = async (chunkSizeBytes: number): Promise<Movie> => {
         const totalChunks = Math.ceil(videoFile.size / chunkSizeBytes);
@@ -640,71 +658,91 @@ export function UploadMovieModal({
         const initData = await parseJsonResponse<{ uploadId: string }>(initRes);
         createdUploadId = initData.uploadId;
 
-        for (let i = 0; i < totalChunks; i += 1) {
-          if (controller.signal.aborted) {
-            throw new Error('Upload cancelled.');
-          }
+        const partLoadedBytes = new Array<number>(totalChunks).fill(0);
+        let completedChunks = 0;
+        let nextChunkIdx = 0;
+        let activeBearerToken = token;
 
-          const start = i * chunkSizeBytes;
-          const end = Math.min(videoFile.size, start + chunkSizeBytes);
-          const chunkBlob = videoFile.slice(start, end);
+        const updateAggregateProgress = () => {
+          const totalLoaded = partLoadedBytes.reduce((sum, b) => sum + b, 0);
+          const overallFraction = videoFile.size > 0 ? totalLoaded / videoFile.size : 0;
+          setUploadProgress(Math.min(95, Math.round(overallFraction * 95)));
+        };
 
-          let chunkSuccess = false;
-          let lastChunkError: Error | null = null;
+        const worker = async () => {
+          while (true) {
+            if (controller.signal.aborted) {
+              throw new Error('Upload cancelled.');
+            }
+            const i = nextChunkIdx;
+            if (i >= totalChunks) return;
+            nextChunkIdx += 1;
 
-          for (let attempt = 1; attempt <= 3; attempt += 1) {
-            try {
-              setUploadStatusText(
-                attempt > 1
-                  ? `Retrying part ${i + 1} of ${totalChunks} (attempt ${attempt})...`
-                  : `Uploading part ${i + 1} of ${totalChunks}...`
-              );
+            const start = i * chunkSizeBytes;
+            const end = Math.min(videoFile.size, start + chunkSizeBytes);
+            const chunkBlob = videoFile.slice(start, end);
 
-              const chunkForm = new FormData();
-              chunkForm.append('chunkIndex', String(i));
-              chunkForm.append('chunk', chunkBlob, `${videoFile.name}.part${i}`);
+            let chunkSuccess = false;
+            let lastChunkError: Error | null = null;
 
-              const forceRefresh = attempt > 1;
-              const freshToken = (await getIdToken(forceRefresh)) || token;
-              await sendXhrFormData<{ received: boolean }>({
-                url: resolveApiUrl(
-                  `/api/movies/chunked/${encodeURIComponent(createdUploadId!)}/part?chunkIndex=${i}`
-                ),
-                formData: chunkForm,
-                token: freshToken,
-                signal: controller.signal,
-                onProgress: (loaded, total) => {
-                  const chunkFraction = total > 0 ? loaded / total : 0;
-                  const overallFraction = (i + chunkFraction) / totalChunks;
-                  setUploadProgress(Math.min(95, Math.round(overallFraction * 95)));
-                },
-              });
-              chunkSuccess = true;
-              break;
-            } catch (chunkErr) {
-              if (controller.signal.aborted) {
-                throw chunkErr;
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              try {
+                if (attempt > 1) {
+                  setUploadStatusText(`Retrying part ${i + 1} of ${totalChunks} (attempt ${attempt})...`);
+                }
+                const chunkForm = new FormData();
+                chunkForm.append('chunkIndex', String(i));
+                chunkForm.append('chunk', chunkBlob, `${videoFile.name}.part${i}`);
+
+                await sendXhrFormData<{ received: boolean }>({
+                  url: resolveApiUrl(
+                    `/api/movies/chunked/${encodeURIComponent(createdUploadId!)}/part?chunkIndex=${i}`
+                  ),
+                  formData: chunkForm,
+                  token: activeBearerToken,
+                  signal: controller.signal,
+                  onProgress: (loaded) => {
+                    partLoadedBytes[i] = Math.min(chunkBlob.size, loaded);
+                    updateAggregateProgress();
+                  },
+                });
+                partLoadedBytes[i] = chunkBlob.size;
+                completedChunks += 1;
+                setUploadStatusText(`Uploading (${completedChunks}/${totalChunks} parts complete)...`);
+                updateAggregateProgress();
+                chunkSuccess = true;
+                break;
+              } catch (chunkErr) {
+                if (controller.signal.aborted) {
+                  throw chunkErr;
+                }
+                if (
+                  chunkErr instanceof UploadHttpError &&
+                  chunkErr.status === 413 &&
+                  chunkSizeBytes > FALLBACK_CHUNK_SIZE_BYTES
+                ) {
+                  throw chunkErr;
+                }
+                if (chunkErr instanceof UploadHttpError && chunkErr.status === 401) {
+                  const refreshed = await getIdToken(true);
+                  if (refreshed) activeBearerToken = refreshed;
+                }
+                partLoadedBytes[i] = 0;
+                lastChunkError =
+                  chunkErr instanceof Error ? chunkErr : new Error('Chunk upload failed.');
+                await new Promise((r) => setTimeout(r, 500 * attempt));
               }
-              if (
-                chunkErr instanceof UploadHttpError &&
-                chunkErr.status === 413 &&
-                chunkSizeBytes > FALLBACK_CHUNK_SIZE_BYTES
-              ) {
-                throw chunkErr;
-              }
-              if (chunkErr instanceof UploadHttpError && chunkErr.status === 401 && attempt === 1) {
-                await getIdToken(true);
-              }
-              lastChunkError =
-                chunkErr instanceof Error ? chunkErr : new Error('Chunk upload failed.');
-              await new Promise((r) => setTimeout(r, 700 * attempt));
+            }
+
+            if (!chunkSuccess) {
+              throw lastChunkError || new Error(`Failed uploading part ${i + 1} of ${totalChunks}.`);
             }
           }
+        };
 
-          if (!chunkSuccess) {
-            throw lastChunkError || new Error(`Failed uploading part ${i + 1} of ${totalChunks}.`);
-          }
-        }
+        setUploadStatusText(`Uploading ${totalChunks} parts in parallel...`);
+        const concurrency = Math.min(3, totalChunks);
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
         setUploadStatusText('Finalizing movie file on server...');
         setUploadProgress(96);
@@ -952,10 +990,11 @@ export function UploadMovieModal({
               <input
                 ref={videoInputRef}
                 type="file"
-                accept="video/*,.mp4,.webm,.mkv,.mov,.m4v"
+                accept="video/*,.mp4,.webm,.mkv,.mov,.m4v,.3gp,.avi,.mpeg,.mpg,.ts"
                 className="hidden"
                 onChange={(e) => {
                   const selected = e.target.files?.[0];
+                  e.currentTarget.value = '';
                   if (selected) inspectVideoFile(selected);
                 }}
               />

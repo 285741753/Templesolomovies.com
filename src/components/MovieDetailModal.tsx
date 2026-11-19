@@ -7,6 +7,7 @@ import {
   Download,
   Edit3,
   Film,
+  History,
   ListVideo,
   Maximize2,
   MessageSquare,
@@ -55,11 +56,15 @@ interface MovieDetailModalProps {
   reviews: MovieReview[];
   isLoadingReviews: boolean;
   savedProgress?: WatchProgressEntry;
+  isInWatchHistory?: boolean;
+  isOffline?: boolean;
+  isPendingRatingSync?: boolean;
   isLowNetwork?: boolean;
   videoQuality?: VideoQualitySetting;
   downloadQuality?: DownloadQualitySetting;
   onSaveProgress?: (movieId: string, progressSeconds: number, durationSeconds: number) => void;
   onClearProgress?: (movieId: string) => void;
+  onClearReadHistory?: (movieId: string) => void;
   onClose: () => void;
   onSelectMovie?: (movie: Movie) => void;
   onDownload: (movie: Movie) => void;
@@ -153,11 +158,15 @@ export function MovieDetailModal({
   reviews,
   isLoadingReviews,
   savedProgress,
+  isInWatchHistory = false,
+  isOffline = false,
+  isPendingRatingSync = false,
   isLowNetwork = false,
   videoQuality = 'auto',
   downloadQuality = '480p',
   onSaveProgress,
   onClearProgress,
+  onClearReadHistory,
   onClose,
   onSelectMovie,
   onDownload,
@@ -217,11 +226,17 @@ export function MovieDetailModal({
   const [isFullscreenActive, setIsFullscreenActive] = useState<boolean>(false);
   const [showLandscapeSuggestion, setShowLandscapeSuggestion] = useState<boolean>(false);
   const [landscapeNoticeDismissed, setLandscapeNoticeDismissed] = useState<boolean>(false);
+  const [readingProgress, setReadingProgress] = useState<number>(0);
+  const [historyCleared, setHistoryCleared] = useState<boolean>(false);
 
+  const modalScrollRef = useRef<HTMLDivElement | null>(null);
+  const stickyHeaderRef = useRef<HTMLDivElement | null>(null);
+  const detailsSectionRef = useRef<HTMLDivElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const orientationLockedRef = useRef<boolean>(false);
   const hasRestoredInitialSeekRef = useRef(false);
+  const historyClearedGuardRef = useRef(false);
   const lastSavedWallMsRef = useRef(0);
   const latestPlaybackRef = useRef<{ movieId: string; time: number; duration: number } | null>(null);
 
@@ -243,8 +258,8 @@ export function MovieDetailModal({
   }, [activeEpisode, episodes]);
 
   const flushPlaybackProgress = useCallback(() => {
+    if (isTrailerMode || historyClearedGuardRef.current) return;
     const video = videoRef.current;
-    if (isTrailerMode) return;
     if (video && movie && Number.isFinite(video.duration) && video.duration > 0) {
       if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
         return;
@@ -257,6 +272,63 @@ export function MovieDetailModal({
       onSaveProgress?.(latest.movieId, latest.time, latest.duration);
     }
   }, [isTrailerMode, movie, onSaveProgress, savedProgress]);
+
+  const handleClearReadHistory = useCallback(() => {
+    if (!movie) return;
+    historyClearedGuardRef.current = true;
+    latestPlaybackRef.current = null;
+    lastSavedWallMsRef.current = Date.now();
+    hasRestoredInitialSeekRef.current = false;
+
+    const video = videoRef.current;
+    if (video) {
+      if (!video.paused) {
+        video.pause();
+      }
+      try {
+        video.currentTime = 0;
+      } catch {
+        // Ignore seek errors before metadata is ready
+      }
+    }
+
+    setIsPlaying(false);
+    setHasStartedPlaying(false);
+    setResumedFromSeconds(0);
+    setHistoryCleared(true);
+    if (onClearReadHistory) {
+      onClearReadHistory(movie.id);
+    } else {
+      onClearProgress?.(movie.id);
+    }
+  }, [movie, onClearReadHistory, onClearProgress]);
+
+  const updateReadingProgress = useCallback(() => {
+    const scroller = modalScrollRef.current;
+    if (!scroller) {
+      setReadingProgress(0);
+      return;
+    }
+    const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+    if (maxScroll <= 24) {
+      setReadingProgress(0);
+      return;
+    }
+
+    const headerHeight = stickyHeaderRef.current?.offsetHeight ?? 68;
+    const detailsTop = detailsSectionRef.current?.offsetTop ?? 0;
+    const readableStart = Math.max(0, detailsTop - headerHeight - 24);
+    const effectiveStart = maxScroll > readableStart + 40 ? readableStart : 0;
+    const scrollableReadingDistance = Math.max(1, maxScroll - effectiveStart);
+
+    if (scroller.scrollTop <= effectiveStart + 4) {
+      setReadingProgress(0);
+      return;
+    }
+
+    const pct = ((scroller.scrollTop - effectiveStart) / scrollableReadingDistance) * 100;
+    setReadingProgress(Math.min(100, Math.max(0, pct)));
+  }, []);
 
   const unlockLandscapeOrientation = useCallback(() => {
     if (!orientationLockedRef.current) return;
@@ -364,9 +436,15 @@ export function MovieDetailModal({
     setShowLandscapeSuggestion(false);
     setLandscapeNoticeDismissed(false);
     hasRestoredInitialSeekRef.current = false;
+    historyClearedGuardRef.current = false;
     lastSavedWallMsRef.current = 0;
     latestPlaybackRef.current = null;
     setResumedFromSeconds(savedProgress?.progressSeconds ?? 0);
+    setReadingProgress(0);
+    setHistoryCleared(false);
+    if (modalScrollRef.current) {
+      modalScrollRef.current.scrollTop = 0;
+    }
 
     if (movie) {
       setEditTitle(movie.title);
@@ -388,6 +466,16 @@ export function MovieDetailModal({
       }
     }
   }, [movie?.id, initialTrailerMode]);
+
+  useEffect(() => {
+    if (!movie) return;
+    const rafId = window.requestAnimationFrame(() => updateReadingProgress());
+    window.addEventListener('resize', updateReadingProgress);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', updateReadingProgress);
+    };
+  }, [movie?.id, reviews.length, episodes.length, isEditing, reportOpen, updateReadingProgress]);
 
   // Track viewport orientation & fullscreen transitions; auto-unlock when leaving fullscreen
   useEffect(() => {
@@ -621,9 +709,16 @@ export function MovieDetailModal({
       aria-modal="true"
       aria-labelledby="detail-modal-title"
     >
-      <div className="w-full max-w-4xl rounded-xl border border-[#27272A] bg-[#111114] shadow-2xl overflow-hidden my-auto max-h-[95vh] overflow-y-auto">
+      <div
+        ref={modalScrollRef}
+        onScroll={updateReadingProgress}
+        className="w-full max-w-4xl rounded-xl border border-[#27272A] bg-[#111114] shadow-2xl overflow-hidden my-auto max-h-[95vh] overflow-y-auto"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-[#27272A] px-4 sm:px-6 py-3.5 sm:py-4 sticky top-0 z-20 bg-[#111114]/95 backdrop-blur-md">
+        <div
+          ref={stickyHeaderRef}
+          className="flex items-center justify-between border-b border-[#27272A] px-4 sm:px-6 py-3.5 sm:py-4 sticky top-0 z-20 bg-[#111114]/95 backdrop-blur-md"
+        >
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h2
@@ -652,14 +747,41 @@ export function MovieDetailModal({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleRequestClose}
-            aria-label="Close movie preview"
-            className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-[#A1A1AA] hover:bg-[#18181B] hover:text-[#FAFAFA] cursor-pointer shrink-0"
+          <div className="flex items-center gap-2 shrink-0">
+            {readingProgress >= 1 && (
+              <span
+                aria-hidden="true"
+                className="hidden sm:inline-flex items-center font-mono text-[10px] tabular-nums text-[#E6A93C]"
+              >
+                {Math.round(readingProgress)}%
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleRequestClose}
+              aria-label="Close movie preview"
+              className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-[#A1A1AA] hover:bg-[#18181B] hover:text-[#FAFAFA] cursor-pointer shrink-0"
+            >
+              <X className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </div>
+
+          {/* Reading Progress Bar */}
+          <div
+            role="progressbar"
+            aria-label="Reading progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(readingProgress)}
+            className={`pointer-events-none absolute inset-x-0 bottom-0 h-[3px] bg-[#27272A]/70 transition-opacity duration-200 ${
+              readingProgress > 0 ? 'opacity-100' : 'opacity-0'
+            }`}
           >
-            <X className="h-5 w-5" aria-hidden="true" />
-          </button>
+            <div
+              className="h-full bg-gradient-to-r from-[#E6A93C] via-[#F5C563] to-[#E6A93C] transition-[width] duration-150 ease-out"
+              style={{ width: `${readingProgress}%` }}
+            />
+          </div>
         </div>
 
         {/* Video Stream Player (or YouTube Embed Player in Trailer Mode) */}
@@ -709,6 +831,8 @@ export function MovieDetailModal({
                 hasRestoredInitialSeekRef.current = true;
               }}
               onPlay={() => {
+                historyClearedGuardRef.current = false;
+                setHistoryCleared(false);
                 setIsPlaying(true);
                 setHasStartedPlaying(true);
                 onMoviePlayed?.(movie.id);
@@ -718,7 +842,7 @@ export function MovieDetailModal({
               }}
               onTimeUpdate={() => {
                 const video = videoRef.current;
-                if (isTrailerMode || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
+                if (isTrailerMode || historyClearedGuardRef.current || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
                   return;
                 }
                 if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
@@ -738,7 +862,7 @@ export function MovieDetailModal({
               onPause={() => {
                 setIsPlaying(false);
                 const video = videoRef.current;
-                if (isTrailerMode || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
+                if (isTrailerMode || historyClearedGuardRef.current || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
                   return;
                 }
                 if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
@@ -754,7 +878,7 @@ export function MovieDetailModal({
               }}
               onSeeked={() => {
                 const video = videoRef.current;
-                if (isTrailerMode || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
+                if (isTrailerMode || historyClearedGuardRef.current || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
                   return;
                 }
                 if (!hasRestoredInitialSeekRef.current && savedProgress && savedProgress.progressSeconds > 0) {
@@ -1097,7 +1221,7 @@ export function MovieDetailModal({
         )}
 
         {/* Movie Details / Inline Owner Edit Form */}
-        <div className="p-4 sm:p-6 space-y-5">
+        <div ref={detailsSectionRef} className="p-4 sm:p-6 space-y-5">
           {isEditing ? (
             <form onSubmit={handleSaveEdit} className="space-y-4 rounded-lg border border-[#27272A] bg-[#09090B] p-4">
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -1318,15 +1442,26 @@ export function MovieDetailModal({
           {/* 5-Star Rating Control */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-[#27272A] bg-[#09090B] px-4 py-3">
             <div>
-              <p className="text-xs font-medium text-[#FAFAFA]">
-                {isAuthenticated
-                  ? ratingSummary?.userRating
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs font-medium text-[#FAFAFA]">
+                  {ratingSummary?.userRating
                     ? `Your Rating: ${ratingSummary.userRating} / 5`
-                    : 'Rate this Movie'
-                  : 'Community 5-Star Rating'}
-              </p>
+                    : isAuthenticated || isOffline
+                    ? 'Rate this Movie'
+                    : 'Community 5-Star Rating'}
+                </p>
+                {isPendingRatingSync && (
+                  <span className="rounded border border-[#E6A93C]/50 bg-[#E6A93C]/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#E6A93C]">
+                    Saved offline · Pending sync
+                  </span>
+                )}
+              </div>
               <p className="text-[11px] text-[#71717A]">
-                {isAuthenticated
+                {isOffline
+                  ? 'Offline mode — rating is saved locally and will sync once connected.'
+                  : isPendingRatingSync && !isAuthenticated
+                  ? 'Sign in now that you are online to sync your saved rating.'
+                  : isAuthenticated
                   ? 'Click a star to submit or update your rating.'
                   : 'Log in or sign up to leave a 5-star rating.'}
               </p>
@@ -1474,6 +1609,34 @@ export function MovieDetailModal({
                   <Share2 className="h-4 w-4" aria-hidden="true" />
                 )}
                 <span>{linkCopied ? t('linkCopied') : t('shareLink')}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleClearReadHistory}
+                disabled={!(Boolean(savedProgress) || resumedFromSeconds > 0 || isInWatchHistory)}
+                aria-label="Clear Read History"
+                title={
+                  Boolean(savedProgress) || resumedFromSeconds > 0 || isInWatchHistory
+                    ? 'Remove this title from Continue Watching'
+                    : historyCleared
+                    ? 'Removed from Continue Watching'
+                    : 'Not currently in Continue Watching'
+                }
+                className={`min-h-[44px] inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-medium transition-colors touch-manipulation ${
+                  historyCleared
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 cursor-default'
+                    : Boolean(savedProgress) || resumedFromSeconds > 0 || isInWatchHistory
+                    ? 'border-[#E5A93B]/50 bg-[#E5A93B]/10 text-[#E5A93B] hover:bg-[#E5A93B]/20 cursor-pointer'
+                    : 'border-[#27272A] bg-[#18181B] text-[#71717A] opacity-60 cursor-not-allowed'
+                }`}
+              >
+                {historyCleared ? (
+                  <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <History className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                <span>{historyCleared ? 'History Cleared' : 'Clear Read History'}</span>
               </button>
 
               <button
