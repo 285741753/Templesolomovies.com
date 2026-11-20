@@ -59,7 +59,7 @@ if (typeof window !== 'undefined') {
       void window.caches.keys().then((keys) =>
         Promise.all(
           keys
-            .filter((key) => !key.includes('v5'))
+            .filter((key) => !key.includes('v6'))
             .filter((key) => key.includes('precache') || key.includes('temple-cinema'))
             .map((key) => window.caches.delete(key))
         )

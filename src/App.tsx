@@ -430,9 +430,19 @@ export default function App() {
   }, [isUploadOpen, isAdminPanelOpen, setBusyActivity]);
 
   useEffect(() => {
-    if (movies.length > 0) {
-      buildAndSaveOfflineSearchIndex(movies);
+    if (movies.length === 0) return;
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      const id = win.requestIdleCallback(() => buildAndSaveOfflineSearchIndex(movies), {
+        timeout: 1200,
+      });
+      return () => win.cancelIdleCallback?.(id);
     }
+    const timer = window.setTimeout(() => buildAndSaveOfflineSearchIndex(movies), 450);
+    return () => window.clearTimeout(timer);
   }, [movies]);
 
   useEffect(() => {
@@ -453,73 +463,18 @@ export default function App() {
     };
   }, []);
 
-  // Reset mobile browser zoom and any horizontal shift when the on-screen keyboard closes or orientation/viewport changes
+  // Keep horizontal scroll pinned to 0 after keyboard close or orientation change without reflowing during scroll
   useEffect(() => {
-    const VIEWPORT_CONTENT =
-      'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
-    let timers: number[] = [];
-
-    const normalizeViewportAndScroll = () => {
-      if (document.documentElement.scrollLeft !== 0) {
-        document.documentElement.scrollLeft = 0;
-      }
-      if (document.body.scrollLeft !== 0) {
-        document.body.scrollLeft = 0;
-      }
+    const resetHorizontalOffset = () => {
       if (window.scrollX !== 0) {
-        window.scrollTo({ left: 0, top: window.scrollY, behavior: 'auto' });
-      }
-      const vv = window.visualViewport;
-      if (vv && vv.scale > 1.01) {
-        const meta = document.querySelector('meta[name="viewport"]');
-        if (meta) {
-          meta.setAttribute('content', `${VIEWPORT_CONTENT}, minimum-scale=1`);
-          window.requestAnimationFrame(() => {
-            meta.setAttribute('content', VIEWPORT_CONTENT);
-          });
-        }
+        window.scrollTo(0, window.scrollY);
       }
     };
-
-    const scheduleNormalize = () => {
-      timers.forEach((id) => window.clearTimeout(id));
-      timers = [
-        window.setTimeout(normalizeViewportAndScroll, 0),
-        window.setTimeout(normalizeViewportAndScroll, 120),
-        window.setTimeout(normalizeViewportAndScroll, 320),
-      ];
-    };
-
-    const handleFocusOut = (event: FocusEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (!target || !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
-        return;
-      }
-      const nextTarget = event.relatedTarget as HTMLElement | null;
-      if (nextTarget && ['INPUT', 'TEXTAREA', 'SELECT'].includes(nextTarget.tagName)) {
-        return;
-      }
-      scheduleNormalize();
-    };
-
-    const handleViewportResize = () => {
-      const activeEl = document.activeElement as HTMLElement | null;
-      const isEditing =
-        activeEl && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
-      if (!isEditing) {
-        scheduleNormalize();
-      }
-    };
-
-    document.addEventListener('focusout', handleFocusOut, true);
-    window.addEventListener('orientationchange', scheduleNormalize);
-    window.visualViewport?.addEventListener('resize', handleViewportResize);
-
+    window.addEventListener('orientationchange', resetHorizontalOffset);
+    document.addEventListener('focusout', resetHorizontalOffset, true);
     return () => {
-      timers.forEach((id) => window.clearTimeout(id));
-      document.removeEventListener('focusout', handleFocusOut, true);
-      window.removeEventListener('orientationchange', scheduleNormalize);
-      window.visualViewport?.removeEventListener('resize', handleViewportResize);
+      window.removeEventListener('orientationchange', resetHorizontalOffset);
+      document.removeEventListener('focusout', resetHorizontalOffset, true);
     };
   }, []);
 
@@ -782,8 +737,16 @@ export default function App() {
           const data = JSON.parse(event.data) as ServerWsEvent;
           if (data.type === 'ws:init') {
             const merged = mergeMoviesWithLocalPersistence(data.movies.map(enrichMovie));
-            setMovies(merged);
-            saveCachedMovies(merged);
+            setMovies((prev) => {
+              if (
+                prev.length === merged.length &&
+                prev.every((m, idx) => m.id === merged[idx]?.id && m.downloads === merged[idx]?.downloads)
+              ) {
+                return prev;
+              }
+              saveCachedMovies(merged);
+              return merged;
+            });
             setMessages(data.messages);
             setOnlineUsers(data.onlineUsers);
             setIsLoading(false);
@@ -877,15 +840,31 @@ export default function App() {
         if (unmounted) return;
         setIsConnected(false);
         setChessRoom(null);
-        reconnectTimerRef.current = window.setTimeout(connect, 2000);
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          return;
+        }
+        reconnectTimerRef.current = window.setTimeout(connect, 2500);
       };
     };
 
-    const startTimer = window.setTimeout(connect, 150);
+    const handleOnlineReconnect = () => {
+      if (unmounted) return;
+      if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
+        connect();
+      }
+    };
+
+    const startTimer = window.setTimeout(() => {
+      if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+        connect();
+      }
+    }, 350);
+    window.addEventListener('online', handleOnlineReconnect);
 
     return () => {
       unmounted = true;
       window.clearTimeout(startTimer);
+      window.removeEventListener('online', handleOnlineReconnect);
       if (reconnectTimerRef.current) {
         window.clearTimeout(reconnectTimerRef.current);
       }
@@ -1559,6 +1538,86 @@ export default function App() {
     return items.map(({ movie, progress }) => ({ movie, progress }));
   }, [movies, continueWatchingList, watchedIds, progressByMovie]);
 
+  const handleResumeContinueWatching = useCallback(
+    (m: Movie) => handleOpenMovie(m, false),
+    [handleOpenMovie]
+  );
+
+  const handleRemoveContinueWatching = useCallback(
+    (movieId: string) => {
+      void clearProgress(movieId);
+    },
+    [clearProgress]
+  );
+
+  const handleRetryUpcoming = useCallback(() => {
+    void retryUpcoming();
+  }, [retryUpcoming]);
+
+  const handleSubscribeRelease = useCallback(
+    async (release: UpcomingMovie, email?: string) => {
+      const res = await subscribeToRelease(release, email);
+      showNotice(`Release alert enabled for "${release.title}" (${res.email}).`);
+    },
+    [subscribeToRelease, showNotice]
+  );
+
+  const handleUnsubscribeRelease = useCallback(
+    async (release: UpcomingMovie) => {
+      await unsubscribeFromRelease(release);
+      showNotice(`Release alert removed for "${release.title}".`);
+    },
+    [unsubscribeFromRelease, showNotice]
+  );
+
+  const handleSubscribeAllReleases = useCallback(
+    async (email?: string) => {
+      const res = await subscribeToAllUpcoming(email);
+      showNotice(`Subscribed ${res.email} to ${res.count} upcoming release alerts.`);
+    },
+    [subscribeToAllUpcoming, showNotice]
+  );
+
+  const handleCreateUpcomingRelease = useCallback(
+    async (input: {
+      title: string;
+      genre: MovieGenre;
+      releaseDate: string;
+      duration: string;
+      quality: MovieQuality;
+      director: string;
+      synopsis: string;
+      posterFile?: File | null;
+    }) => {
+      const created = await createUpcomingRelease(input);
+      showNotice(`Scheduled "${created.title}" in Coming Soon.`);
+    },
+    [createUpcomingRelease, showNotice]
+  );
+
+  const handleDeleteUpcomingRelease = useCallback(
+    async (releaseId: string) => {
+      await deleteUpcomingRelease(releaseId);
+      showNotice('Removed upcoming release.');
+    },
+    [deleteUpcomingRelease, showNotice]
+  );
+
+  const handleBackToSpotlight = useCallback(() => {
+    navigateToView('home', 'spotlight');
+  }, [navigateToView]);
+
+  const handleOpenDownloadsFromSearch = useCallback(() => {
+    setCollectionView('all');
+    setSelectedGenre('All');
+    setCatalogSort('downloads');
+    navigateToView('downloads', 'catalog');
+  }, [navigateToView]);
+
+  const handleShareSiteLink = useCallback(() => {
+    showNotice('Preview link copied — ready to share!');
+  }, [showNotice]);
+
   const handleRemoveWatchHistory = useCallback(
     (movieId: string) => {
       void clearProgress(movieId);
@@ -1614,6 +1673,7 @@ export default function App() {
         onOpenWatchParty={() => setIsWatchPartyOpen(true)}
         onScrollToChat={scrollToChat}
         onSelectCollection={handleSelectCollection}
+        onShareSite={handleShareSiteLink}
         onLoggedOut={() => {
           setCollectionView('all');
           showNotice('You have logged out.');
@@ -1711,8 +1771,8 @@ export default function App() {
                     <ContinueWatchingRow
                       movies={categoryFilteredMovies}
                       entries={categoryContinueWatching}
-                      onResumeMovie={(m) => handleOpenMovie(m, false)}
-                      onRemoveProgress={(movieId) => void clearProgress(movieId)}
+                      onResumeMovie={handleResumeContinueWatching}
+                      onRemoveProgress={handleRemoveContinueWatching}
                     />
 
                     {/* 4. Trending Now (top 5 most downloaded) */}
@@ -1763,27 +1823,12 @@ export default function App() {
                       subscribedIds={subscribedIdSet}
                       effectiveEmail={effectiveEmail}
                       isAdmin={isAdmin}
-                      onRetry={() => void retryUpcoming()}
-                      onSubscribe={async (release: UpcomingMovie, email?: string) => {
-                        const res = await subscribeToRelease(release, email);
-                        showNotice(`Release alert enabled for "${release.title}" (${res.email}).`);
-                      }}
-                      onUnsubscribe={async (release: UpcomingMovie) => {
-                        await unsubscribeFromRelease(release);
-                        showNotice(`Release alert removed for "${release.title}".`);
-                      }}
-                      onSubscribeAll={async (email?: string) => {
-                        const res = await subscribeToAllUpcoming(email);
-                        showNotice(`Subscribed ${res.email} to ${res.count} upcoming release alerts.`);
-                      }}
-                      onCreateUpcoming={async (input) => {
-                        const created = await createUpcomingRelease(input);
-                        showNotice(`Scheduled "${created.title}" in Coming Soon.`);
-                      }}
-                      onDeleteUpcoming={async (releaseId) => {
-                        await deleteUpcomingRelease(releaseId);
-                        showNotice('Removed upcoming release.');
-                      }}
+                      onRetry={handleRetryUpcoming}
+                      onSubscribe={handleSubscribeRelease}
+                      onUnsubscribe={handleUnsubscribeRelease}
+                      onSubscribeAll={handleSubscribeAllReleases}
+                      onCreateUpcoming={handleCreateUpcomingRelease}
+                      onDeleteUpcoming={handleDeleteUpcomingRelease}
                     />
                   </Suspense>
                 </ErrorBoundary>
@@ -1820,13 +1865,8 @@ export default function App() {
                 onSelectGenre={setSelectedGenre}
                 onSelectQuality={setSelectedQuality}
                 onChangeSortBy={setSearchSort}
-                onBackHome={() => navigateToView('home', 'spotlight')}
-                onOpenDownloads={() => {
-                  setCollectionView('all');
-                  setSelectedGenre('All');
-                  setCatalogSort('downloads');
-                  navigateToView('downloads', 'catalog');
-                }}
+                onBackHome={handleBackToSpotlight}
+                onOpenDownloads={handleOpenDownloadsFromSearch}
                 onSelectMovie={handleOpenMovieDirect}
                 onPlayTrailer={handleOpenMovieTrailer}
                 onDownload={handleDownloadMovie}

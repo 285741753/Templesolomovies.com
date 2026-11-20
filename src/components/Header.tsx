@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { memo, useEffect, useRef, useState, type RefObject } from 'react';
 import {
   LogOut,
   Upload,
@@ -15,6 +15,7 @@ import {
   MessageCircle,
   ExternalLink,
   Settings,
+  Share2,
   ShieldCheck,
   Gamepad2,
 } from 'lucide-react';
@@ -42,10 +43,11 @@ interface HeaderProps {
   onOpenWatchParty: () => void;
   onScrollToChat: () => void;
   onSelectCollection: (view: 'all' | 'saved' | 'uploads') => void;
+  onShareSite?: () => void;
   onLoggedOut: () => void;
 }
 
-export function Header({
+export const Header = memo(function Header({
   activeView,
   searchQuery,
   searchInputRef,
@@ -60,6 +62,7 @@ export function Header({
   onOpenWatchParty,
   onScrollToChat,
   onSelectCollection,
+  onShareSite,
   onLoggedOut,
 }: HeaderProps) {
   const { user, profile, isAdmin, logOut, getIdToken } = useAuth();
@@ -67,6 +70,7 @@ export function Header({
   const [menuOpen, setMenuOpen] = useState(false);
   const [langMenuOpen, setLangMenuOpen] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const langMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -121,8 +125,32 @@ export function Header({
     onSelectView('search', 'search-page');
   };
 
+  const handleSharePreviewLink = async () => {
+    const shareUrl = window.location.origin;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'TEMPLE CINEMA — templesolosmovies.com',
+          text: 'Watch movies, listen to Afrobeats & soundtracks, and chat live on Temple Cinema.',
+          url: shareUrl,
+        });
+        return;
+      } catch {
+        // Fallback to clipboard if share dismissed or unsupported
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopiedLink(true);
+      window.setTimeout(() => setCopiedLink(false), 2200);
+      onShareSite?.();
+    } catch {
+      onShareSite?.();
+    }
+  };
+
   return (
-    <header className="sticky top-0 z-40 border-b border-[#27272A] bg-[#09090B]/95 backdrop-blur-md">
+    <header className="sticky top-0 z-40 border-b border-[#27272A] bg-[#09090B]/98 lg:backdrop-blur-md">
       <div className="mx-auto flex max-w-[1440px] flex-wrap md:flex-nowrap items-center justify-between gap-x-2.5 gap-y-2.5 sm:gap-5 px-3 sm:px-6 lg:px-8 py-2.5 sm:py-3 min-w-0">
         {/* Zone 1: Scalable Temple Cinema SVG Icon (28px) & Gold Wordmark */}
         <button
@@ -349,6 +377,21 @@ export function Header({
 
           <button
             type="button"
+            onClick={() => void handleSharePreviewLink()}
+            aria-label="Share site preview link"
+            title="Copy or share preview link"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#27272A] bg-[#111114] px-2.5 py-2 text-xs font-medium text-[#D4D4D8] hover:border-[#E5A93B] hover:text-[#FAFAFA] transition-colors whitespace-nowrap shrink-0 touch-manipulation cursor-pointer"
+          >
+            {copiedLink ? (
+              <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
+            ) : (
+              <Share2 className="h-3.5 w-3.5 text-[#E5A93B] shrink-0" aria-hidden="true" />
+            )}
+            <span className="hidden lg:inline">{copiedLink ? 'Copied' : 'Share'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               setLangMenuOpen(false);
               setMenuOpen(false);
@@ -520,4 +563,4 @@ export function Header({
       </div>
     </header>
   );
-}
+});

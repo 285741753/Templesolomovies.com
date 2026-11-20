@@ -708,10 +708,10 @@ export const MovieGrid = memo(function MovieGrid({
                     }}
                     aria-label={isSaved ? `Remove ${movie.title} from watchlist` : `Save ${movie.title} to watchlist`}
                     title={isSaved ? 'Saved in watchlist' : 'Save to watchlist'}
-                    className={`absolute top-3 right-3 rounded-lg p-2 backdrop-blur-sm border transition-colors cursor-pointer ${
+                    className={`absolute top-3 right-3 rounded-lg p-2 border transition-colors cursor-pointer ${
                       isSaved
                         ? 'bg-[#E5A93B] border-[#E5A93B] text-[#09090B]'
-                        : 'bg-[#09090B]/70 border-[#27272A] text-[#FAFAFA] hover:border-[#E5A93B]'
+                        : 'bg-[#09090B]/85 border-[#27272A] text-[#FAFAFA] hover:border-[#E5A93B]'
                     }`}
                   >
                     <Bookmark

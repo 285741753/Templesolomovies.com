@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Film, Play, X } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { Movie, WatchProgressEntry } from '../types/cinema';
@@ -32,6 +32,8 @@ function ContinueThumbnail({
     <img
       src={src}
       alt={`${title} frame`}
+      loading="lazy"
+      decoding="async"
       referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
       className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
@@ -39,7 +41,7 @@ function ContinueThumbnail({
   );
 }
 
-export function ContinueWatchingRow({
+export const ContinueWatchingRow = memo(function ContinueWatchingRow({
   movies,
   entries,
   onResumeMovie,
@@ -69,7 +71,7 @@ export function ContinueWatchingRow({
     <section
       id="continue-watching"
       aria-label={t('continueWatchingTitle')}
-      className="border-b border-[#27272A]/80 bg-[#09090B]"
+      className="perf-section border-b border-[#27272A]/80 bg-[#09090B]"
     >
       <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex items-end justify-between gap-4 mb-4">
@@ -223,4 +225,4 @@ export function ContinueWatchingRow({
       </div>
     </section>
   );
-}
+});

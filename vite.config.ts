@@ -31,7 +31,7 @@ export default defineConfig(() => {
         ],
         manifest: false,
         workbox: {
-          cacheId: 'temple-cinema-v5',
+          cacheId: 'temple-cinema-v6',
           cleanupOutdatedCaches: true,
           skipWaiting: true,
           clientsClaim: true,
@@ -45,6 +45,7 @@ export default defineConfig(() => {
             /^\/ws/,
             /^\/socket\.io\//,
             /^\/downloads\//,
+            /^\/__/,
           ],
           runtimeCaching: [
             {
@@ -81,12 +82,26 @@ export default defineConfig(() => {
               },
             },
             {
-              urlPattern: /\/storage\/posters\/.*/i,
-              handler: 'CacheFirst',
+              urlPattern: /\/api\/music\/tracks/i,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'cinema-music-tracks-cache',
+                expiration: {
+                  maxEntries: 30,
+                  maxAgeSeconds: 60 * 60,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: ({ request }) => request.destination === 'image',
+              handler: 'StaleWhileRevalidate',
               options: {
                 cacheName: 'cinema-posters-cache',
                 expiration: {
-                  maxEntries: 120,
+                  maxEntries: 200,
                   maxAgeSeconds: 60 * 60 * 24 * 30,
                 },
                 cacheableResponse: {

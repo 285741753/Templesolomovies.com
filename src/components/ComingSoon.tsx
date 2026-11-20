@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import {
   Bell,
   BellRing,
@@ -98,7 +98,7 @@ function UpcomingPoster({ posterUrl, title }: { posterUrl: string; title: string
   );
 }
 
-export function ComingSoon({
+export const ComingSoon = memo(function ComingSoon({
   upcomingMovies,
   isLoading,
   error,
@@ -249,7 +249,7 @@ export function ComingSoon({
     <section
       id="coming-soon"
       aria-labelledby="coming-soon-heading"
-      className="w-full max-w-full overflow-x-clip border-b border-[#27272A] bg-[#09090B]"
+      className="perf-section w-full max-w-full overflow-x-clip border-b border-[#27272A] bg-[#09090B]"
     >
       <div className="mx-auto max-w-[1440px] px-4 py-9 sm:px-6 lg:px-8">
         {/* Section Header + Global Release Alert Signup */}
@@ -697,4 +697,4 @@ export function ComingSoon({
       )}
     </section>
   );
-}
+});

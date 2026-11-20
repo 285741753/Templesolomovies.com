@@ -1,4 +1,4 @@
-import type { ComponentType } from 'react';
+import { memo, type ComponentType } from 'react';
 import { Download, Gamepad2, MessageSquare, Search, User } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { TempleNavHomeIcon } from './TempleLogo';
@@ -16,7 +16,7 @@ interface BottomNavBarProps {
   onSelectProfile: () => void;
 }
 
-export function BottomNavBar({
+export const BottomNavBar = memo(function BottomNavBar({
   activeTab,
   activeDownloadsCount = 0,
   onSelectHome,
@@ -45,7 +45,7 @@ export function BottomNavBar({
   return (
     <nav
       aria-label="Mobile navigation"
-      className="lg:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-[#27272A] bg-[#0A0A0C]/95 backdrop-blur-md pb-[env(safe-area-inset-bottom)] touch-manipulation"
+      className="lg:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-[#27272A] bg-[#0A0A0C]/98 pb-[env(safe-area-inset-bottom)] touch-manipulation"
     >
       <div className="grid grid-cols-6 items-center h-16 max-w-xl mx-auto px-1">
         {tabs.map((tab) => {
@@ -78,4 +78,4 @@ export function BottomNavBar({
       </div>
     </nav>
   );
-}
+});

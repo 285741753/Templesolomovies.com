@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { HomeCategoryChip, Movie } from '../types/cinema';
 
@@ -71,7 +72,7 @@ interface CategoryChipsBarProps {
   filteredCount: number;
 }
 
-export function CategoryChipsBar({
+export const CategoryChipsBar = memo(function CategoryChipsBar({
   selectedCategory,
   onSelectCategory,
   filteredCount,
@@ -126,4 +127,4 @@ export function CategoryChipsBar({
       </div>
     </section>
   );
-}
+});

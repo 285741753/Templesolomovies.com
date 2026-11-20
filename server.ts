@@ -1009,7 +1009,7 @@ async function startServer() {
     res.json = ((body: unknown) => {
       const jsonStr = JSON.stringify(body);
       const accept = String(req.headers['accept-encoding'] || '');
-      if (jsonStr.length > 1024 && !res.headersSent) {
+      if (typeof jsonStr === 'string' && jsonStr.length > 1024 && !res.headersSent) {
         if (accept.includes('gzip')) {
           const compressed = zlib.gzipSync(jsonStr, { level: 1 });
           res.setHeader('Content-Encoding', 'gzip');
@@ -3742,8 +3742,32 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
   } else {
     const distDir = path.join(ROOT_DIR, 'dist');
     app.use('/assets', express.static(path.join(distDir, 'assets'), { maxAge: '30d', immutable: true }));
-    app.use(express.static(distDir, { maxAge: '1h', etag: true }));
-    app.get('*', (_req, res) => {
+    app.use('/assets', (_req, res) => {
+      res.status(404).end();
+    });
+    app.use(
+      express.static(distDir, {
+        maxAge: '1h',
+        etag: true,
+        setHeaders: (res, filePath) => {
+          const base = path.basename(filePath);
+          if (
+            base === 'index.html' ||
+            base === 'sw.js' ||
+            base === 'manifest.webmanifest' ||
+            base === 'manifest.json'
+          ) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/__')) {
+        res.status(404).end();
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

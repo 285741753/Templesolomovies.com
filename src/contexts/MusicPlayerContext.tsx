@@ -50,12 +50,14 @@ interface MusicPlayerContextValue {
   trackError: string | null;
   noticeMessage: string | null;
   searchQuery: string;
+  selectedGenre: string;
   playbackMode: ActivePlaybackMode;
   isExpanded: boolean;
   isMiniDismissed: boolean;
   spotifyStatus: SpotifySessionStatus;
   sdkReady: boolean;
-  searchTracks: (query: string) => Promise<void>;
+  searchTracks: (query: string, genre?: string) => Promise<void>;
+  selectGenre: (genre: string, query?: string) => Promise<void>;
   playTrack: (track: MusicTrack, nextQueue?: MusicTrack[]) => Promise<void>;
   togglePlayPause: () => Promise<void>;
   pauseMusic: () => void;
@@ -80,6 +82,7 @@ const MusicProgressContext = createContext<MusicProgressContextValue>({
 });
 const SPOTIFY_SID_STORAGE_KEY = 'tsm_spotify_sid_v1';
 const MUSIC_CACHE_STORAGE_KEY = 'tsm_cached_music_v1';
+const MUSIC_GENRE_CACHE_STORAGE_KEY = 'tsm_cached_music_genres_v1';
 const PREVIEW_MAX_SECONDS = 30;
 
 function loadCachedMusicTracks(): MusicTrack[] {
@@ -98,6 +101,33 @@ function saveCachedMusicTracks(list: MusicTrack[]) {
   if (typeof window === 'undefined' || list.length === 0) return;
   try {
     window.localStorage.setItem(MUSIC_CACHE_STORAGE_KEY, JSON.stringify(list.slice(0, 20)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadCachedGenreTracksMap(): Record<string, MusicTrack[]> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(MUSIC_GENRE_CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, MusicTrack[]>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCachedGenreTracks(genreKey: string, list: MusicTrack[]) {
+  if (typeof window === 'undefined' || list.length === 0) return;
+  try {
+    const current = loadCachedGenreTracksMap();
+    const keys = Object.keys(current);
+    if (keys.length >= 12 && !current[genreKey]) {
+      delete current[keys[0]];
+    }
+    current[genreKey] = list.slice(0, 16);
+    window.localStorage.setItem(MUSIC_GENRE_CACHE_STORAGE_KEY, JSON.stringify(current));
   } catch {
     // Ignore storage quota errors
   }
@@ -126,13 +156,15 @@ function storeSpotifySid(sid: string) {
 }
 
 export function MusicPlayerProvider({ children }: { children: ReactNode }) {
-  const [tracks, setTracks] = useState<MusicTrack[]>(() => loadCachedMusicTracks());
-  const [currentTrack, setCurrentTrack] = useState<MusicTrack | null>(() => loadCachedMusicTracks()[0] || null);
+  const initialCachedTracks = useMemo(() => loadCachedMusicTracks(), []);
+  const [tracks, setTracks] = useState<MusicTrack[]>(initialCachedTracks);
+  const [currentTrack, setCurrentTrack] = useState<MusicTrack | null>(() => initialCachedTracks[0] || null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoadingTracks, setIsLoadingTracks] = useState(() => loadCachedMusicTracks().length === 0);
+  const [isLoadingTracks, setIsLoadingTracks] = useState(() => initialCachedTracks.length === 0);
   const [trackError, setTrackError] = useState<string | null>(null);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedGenre, setSelectedGenre] = useState('All');
   const [playbackMode, setPlaybackMode] = useState<ActivePlaybackMode>('preview');
   const [currentTimeSec, setCurrentTimeSec] = useState(0);
   const [durationSec, setDurationSec] = useState(PREVIEW_MAX_SECONDS);
@@ -157,6 +189,9 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
   const currentTrackRef = useRef(currentTrack);
   const tracksRef = useRef(tracks);
   const spotifySidRef = useRef(spotifySid);
+  const selectedGenreRef = useRef(selectedGenre);
+  const trackQueryCacheRef = useRef<Map<string, MusicTrack[]>>(new Map());
+  const searchAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
@@ -173,6 +208,9 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     spotifySidRef.current = spotifySid;
   }, [spotifySid]);
+  useEffect(() => {
+    selectedGenreRef.current = selectedGenre;
+  }, [selectedGenre]);
 
   const showNotice = useCallback((msg: string) => {
     setNoticeMessage(msg);
@@ -291,42 +329,143 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
   }, [authHeaders]);
 
   const searchTracks = useCallback(
-    async (query: string) => {
+    async (query: string, genreOverride?: string) => {
+      const activeGenre = typeof genreOverride === 'string' ? genreOverride : selectedGenreRef.current;
+      const cleanQuery = query.trim();
+      const cacheKey = `${activeGenre.toLowerCase()}::${cleanQuery.toLowerCase()}`;
+
       setSearchQuery(query);
-      setIsLoadingTracks(true);
+      if (typeof genreOverride === 'string') {
+        setSelectedGenre(genreOverride);
+        selectedGenreRef.current = genreOverride;
+      }
       setTrackError(null);
+
+      // 0ms client-side memory cache hit
+      const memCached = trackQueryCacheRef.current.get(cacheKey);
+      if (memCached && memCached.length > 0) {
+        setTracks(memCached);
+        setCurrentTrack((prev) => prev || memCached[0] || null);
+        setIsLoadingTracks(false);
+        return;
+      }
+
+      // 0ms offline/warm localStorage genre cache hit while fetching fresh in background
+      if (!cleanQuery) {
+        const storedGenreMap = loadCachedGenreTracksMap();
+        const storedGenreTracks = storedGenreMap[activeGenre];
+        if (storedGenreTracks && storedGenreTracks.length > 0) {
+          setTracks(storedGenreTracks);
+          setCurrentTrack((prev) => prev || storedGenreTracks[0] || null);
+        }
+      }
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        const storedGenreMap = loadCachedGenreTracksMap();
+        const offlineList = storedGenreMap[activeGenre] || loadCachedMusicTracks();
+        if (offlineList.length > 0) {
+          const filteredOffline = cleanQuery
+            ? offlineList.filter((item) =>
+                `${item.title} ${item.artist} ${item.album} ${item.genre || ''}`
+                  .toLowerCase()
+                  .includes(cleanQuery.toLowerCase())
+              )
+            : offlineList;
+          setTracks(filteredOffline.length > 0 ? filteredOffline : offlineList);
+          setTrackError(null);
+        } else {
+          setTrackError('Connect once to cache music tracks for offline browsing.');
+        }
+        setIsLoadingTracks(false);
+        return;
+      }
+
+      if (searchAbortRef.current) {
+        searchAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+
+      setIsLoadingTracks(true);
       try {
-        const resp = await fetch(`/api/music/tracks?q=${encodeURIComponent(query)}`, {
+        const params = new URLSearchParams();
+        if (cleanQuery) params.set('q', cleanQuery);
+        if (activeGenre && activeGenre !== 'All') params.set('genre', activeGenre);
+        const resp = await fetch(`/api/music/tracks?${params.toString()}`, {
           credentials: 'include',
           headers: authHeaders(),
+          signal: controller.signal,
         });
         const data = (await resp.json()) as { tracks?: MusicTrack[]; error?: string };
         const nextTracks = Array.isArray(data.tracks) ? data.tracks : [];
+        if (controller.signal.aborted) return;
+
         setTracks(nextTracks);
-        if (nextTracks.length > 0 && (!query.trim() || query.trim().toLowerCase() === 'afrobeats')) {
-          saveCachedMusicTracks(nextTracks);
+        if (nextTracks.length > 0) {
+          if (trackQueryCacheRef.current.size >= 30) {
+            const oldestKey = trackQueryCacheRef.current.keys().next().value;
+            if (oldestKey) trackQueryCacheRef.current.delete(oldestKey);
+          }
+          trackQueryCacheRef.current.set(cacheKey, nextTracks);
+          if (!cleanQuery) {
+            saveCachedGenreTracks(activeGenre, nextTracks);
+          }
+          if ((!cleanQuery || cleanQuery.toLowerCase() === 'afrobeats') && activeGenre === 'All') {
+            saveCachedMusicTracks(nextTracks);
+          }
         }
         // Set initial track display ONLY when none selected yet, WITHOUT starting playback
         setCurrentTrack((prev) => prev || nextTracks[0] || null);
         if (!resp.ok && data.error) {
           setTrackError(data.error);
         }
-      } catch {
+      } catch (err) {
+        if ((err as { name?: string })?.name === 'AbortError') return;
         if (tracksRef.current.length === 0) {
           setTrackError('Unable to load music tracks while offline.');
         }
       } finally {
-        setIsLoadingTracks(false);
+        if (searchAbortRef.current === controller) {
+          searchAbortRef.current = null;
+          setIsLoadingTracks(false);
+        }
       }
     },
     [authHeaders]
   );
 
-  // Initial load: fetch status and legal preview catalog in parallel (strictly NO autoplay)
+  const selectGenre = useCallback(
+    async (genre: string, customQuery?: string) => {
+      const nextGenre = genre || 'All';
+      setSelectedGenre(nextGenre);
+      selectedGenreRef.current = nextGenre;
+      await searchTracks(typeof customQuery === 'string' ? customQuery : '', nextGenre);
+    },
+    [searchTracks]
+  );
+
+  // Initial load: defer when cached tracks are already hydrated so critical movie catalog loads first
   useEffect(() => {
-    void fetchSpotifyStatus();
-    void searchTracks('Afrobeats');
-  }, [fetchSpotifyStatus, searchTracks]);
+    const runInitialFetch = () => {
+      void fetchSpotifyStatus();
+      void searchTracks('Afrobeats', 'All');
+    };
+
+    if (initialCachedTracks.length > 0) {
+      const win = window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+        cancelIdleCallback?: (id: number) => void;
+      };
+      if (typeof win.requestIdleCallback === 'function') {
+        const id = win.requestIdleCallback(runInitialFetch, { timeout: 900 });
+        return () => win.cancelIdleCallback?.(id);
+      }
+      const timer = window.setTimeout(runInitialFetch, 250);
+      return () => window.clearTimeout(timer);
+    }
+
+    runInitialFetch();
+  }, [fetchSpotifyStatus, searchTracks, initialCachedTracks.length]);
 
   // Listen for OAuth popup completion
   useEffect(() => {
@@ -679,12 +818,14 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
       trackError,
       noticeMessage,
       searchQuery,
+      selectedGenre,
       playbackMode,
       isExpanded,
       isMiniDismissed,
       spotifyStatus,
       sdkReady,
       searchTracks,
+      selectGenre,
       playTrack,
       togglePlayPause,
       pauseMusic,
@@ -704,12 +845,14 @@ export function MusicPlayerProvider({ children }: { children: ReactNode }) {
       trackError,
       noticeMessage,
       searchQuery,
+      selectedGenre,
       playbackMode,
       isExpanded,
       isMiniDismissed,
       spotifyStatus,
       sdkReady,
       searchTracks,
+      selectGenre,
       playTrack,
       togglePlayPause,
       pauseMusic,

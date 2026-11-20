@@ -149,6 +149,21 @@ function buildSpotifySearchUrl(artist: string, title: string): string {
   return `https://open.spotify.com/search/${encodeURIComponent(q)}`;
 }
 
+function combineMusicSearchTerm(query: string, genre: string): string {
+  const cleanQuery = query.trim();
+  const cleanGenre = genre.trim();
+  if (!cleanGenre || cleanGenre.toLowerCase() === 'all') {
+    return cleanQuery || 'Afrobeats Burna Boy Rema Tems Wizkid Asake';
+  }
+  if (!cleanQuery) {
+    return cleanGenre;
+  }
+  if (cleanQuery.toLowerCase().includes(cleanGenre.toLowerCase())) {
+    return cleanQuery;
+  }
+  return `${cleanQuery} ${cleanGenre}`.trim();
+}
+
 interface ItunesSearchResultItem {
   trackId?: number;
   trackName?: string;
@@ -162,67 +177,88 @@ interface ItunesSearchResultItem {
 
 const ITUNES_CACHE_TTL_MS = 10 * 60 * 1000;
 const itunesSearchCache = new Map<string, { tracks: MusicTrack[]; expiresAtMs: number }>();
+const inflightItunesRequests = new Map<string, Promise<MusicTrack[]>>();
 
-async function fetchItunesPreviews(term: string, limit = 16): Promise<MusicTrack[]> {
+async function fetchItunesPreviews(
+  term: string,
+  limit = 16,
+  preferredGenre = ''
+): Promise<MusicTrack[]> {
   const cleanTerm = term.trim() || 'Afrobeats Burna Boy Tems Wizkid';
+  const cleanGenre = preferredGenre.trim();
+  const genreTag = cleanGenre && cleanGenre.toLowerCase() !== 'all' ? cleanGenre : '';
   const clampedLimit = Math.min(25, Math.max(1, limit));
-  const cacheKey = `${cleanTerm.toLowerCase()}::${clampedLimit}`;
+  const cacheKey = `${cleanTerm.toLowerCase()}::${clampedLimit}::${genreTag.toLowerCase()}`;
   const cached = itunesSearchCache.get(cacheKey);
   if (cached && cached.expiresAtMs > Date.now()) {
     return cached.tracks;
   }
 
-  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(cleanTerm)}&media=music&entity=song&limit=${clampedLimit}`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6500);
-  let resp: Response;
-  try {
-    resp = await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
+  const inflight = inflightItunesRequests.get(cacheKey);
+  if (inflight) {
+    return inflight;
   }
-  if (!resp.ok) {
-    throw new Error(`iTunes Search API HTTP ${resp.status}`);
-  }
-  const json = (await resp.json()) as { results?: ItunesSearchResultItem[] };
-  const rows = Array.isArray(json.results) ? json.results : [];
 
-  const tracks: MusicTrack[] = rows
-    .filter((item) => item.trackId && item.trackName && item.artistName)
-    .map((item) => {
-      const title = item.trackName || 'Untitled Track';
-      const artist = item.artistName || 'Unknown Artist';
-      const artworkUrl = (item.artworkUrl100 || '').replace('100x100bb', '300x300bb');
-      const fullDurationSec = item.trackTimeMillis
-        ? Math.max(30, Math.round(item.trackTimeMillis / 1000))
-        : 180;
+  const runPromise = (async () => {
+    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(cleanTerm)}&media=music&entity=song&limit=${clampedLimit}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    let resp: Response;
+    try {
+      resp = await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!resp.ok) {
+      throw new Error(`iTunes Search API HTTP ${resp.status}`);
+    }
+    const json = (await resp.json()) as { results?: ItunesSearchResultItem[] };
+    const rows = Array.isArray(json.results) ? json.results : [];
 
-      return {
-        id: `itunes-${item.trackId}`,
-        title,
-        artist,
-        album: item.collectionName || 'Single',
-        artworkUrl,
-        previewUrl: item.previewUrl || null,
-        previewDurationSec: 30,
-        fullDurationSec,
-        spotifyUrl: buildSpotifySearchUrl(artist, title),
-        boomplayUrl: buildBoomplaySearchUrl(artist, title),
-        genre: item.primaryGenreName || 'Music',
-        source: 'itunes-preview',
-      };
+    const tracks: MusicTrack[] = rows
+      .filter((item) => item.trackId && item.trackName && item.artistName)
+      .map((item) => {
+        const title = item.trackName || 'Untitled Track';
+        const artist = item.artistName || 'Unknown Artist';
+        const artworkUrl = (item.artworkUrl100 || '').replace('100x100bb', '300x300bb');
+        const fullDurationSec = item.trackTimeMillis
+          ? Math.max(30, Math.round(item.trackTimeMillis / 1000))
+          : 180;
+
+        return {
+          id: `itunes-${item.trackId}`,
+          title,
+          artist,
+          album: item.collectionName || 'Single',
+          artworkUrl,
+          previewUrl: item.previewUrl || null,
+          previewDurationSec: 30,
+          fullDurationSec,
+          spotifyUrl: buildSpotifySearchUrl(artist, title),
+          boomplayUrl: buildBoomplaySearchUrl(artist, title),
+          genre: genreTag || item.primaryGenreName || 'Music',
+          source: 'itunes-preview',
+        };
+      });
+
+    if (itunesSearchCache.size >= 80) {
+      const oldestKey = itunesSearchCache.keys().next().value;
+      if (oldestKey) itunesSearchCache.delete(oldestKey);
+    }
+    itunesSearchCache.set(cacheKey, {
+      tracks,
+      expiresAtMs: Date.now() + ITUNES_CACHE_TTL_MS,
     });
 
-  if (itunesSearchCache.size >= 50) {
-    const oldestKey = itunesSearchCache.keys().next().value;
-    if (oldestKey) itunesSearchCache.delete(oldestKey);
-  }
-  itunesSearchCache.set(cacheKey, {
-    tracks,
-    expiresAtMs: Date.now() + ITUNES_CACHE_TTL_MS,
-  });
+    return tracks;
+  })();
 
-  return tracks;
+  inflightItunesRequests.set(cacheKey, runPromise);
+  try {
+    return await runPromise;
+  } finally {
+    inflightItunesRequests.delete(cacheKey);
+  }
 }
 
 async function findItunesPreviewUrl(artist: string, title: string): Promise<string | null> {
@@ -248,8 +284,15 @@ interface SpotifyTrackApiItem {
   };
 }
 
-async function fetchSpotifyTracks(accessToken: string, query: string, limit = 14): Promise<MusicTrack[]> {
+async function fetchSpotifyTracks(
+  accessToken: string,
+  query: string,
+  limit = 14,
+  preferredGenre = ''
+): Promise<MusicTrack[]> {
   const cleanQuery = query.trim() || 'Afrobeats';
+  const cleanGenre = preferredGenre.trim();
+  const genreTag = cleanGenre && cleanGenre.toLowerCase() !== 'all' ? cleanGenre : 'Music';
   const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(cleanQuery)}&type=track&limit=${Math.min(20, Math.max(1, limit))}`;
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -280,6 +323,7 @@ async function fetchSpotifyTracks(accessToken: string, query: string, limit = 14
         spotifyUrl: item.external_urls?.spotify || buildSpotifySearchUrl(artist, title),
         spotifyUri: item.uri,
         boomplayUrl: buildBoomplaySearchUrl(artist, title),
+        genre: genreTag,
         source: 'spotify',
       };
     })
@@ -538,14 +582,16 @@ export function attachMusicRoutes(app: express.Express) {
 
   app.get('/api/music/tracks', async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const genre = typeof req.query.genre === 'string' ? req.query.genre.trim() : '';
+    const effectiveQuery = combineMusicSearchTerm(q, genre);
     const session = getSpotifySessionFromReq(req);
 
     if (session) {
       const token = await ensureFreshSpotifyToken(session);
       if (token) {
         try {
-          const tracks = await fetchSpotifyTracks(token, q || 'Afrobeats', 14);
-          res.json({ tracks, provider: 'spotify' });
+          const tracks = await fetchSpotifyTracks(token, effectiveQuery, 14, genre);
+          res.json({ tracks, provider: 'spotify', genre: genre || 'All' });
           return;
         } catch (err) {
           console.warn('[Music Search] Falling back to iTunes legal previews:', err);
@@ -554,11 +600,9 @@ export function attachMusicRoutes(app: express.Express) {
     }
 
     try {
-      const tracks = await fetchItunesPreviews(
-        q || 'Afrobeats Burna Boy Rema Tems Wizkid Asake',
-        16
-      );
-      res.json({ tracks, provider: 'itunes-preview' });
+      const tracks = await fetchItunesPreviews(effectiveQuery, 16, genre);
+      res.setHeader('Cache-Control', 'public, max-age=180, stale-while-revalidate=600');
+      res.json({ tracks, provider: 'itunes-preview', genre: genre || 'All' });
     } catch (err) {
       console.error('[Music Search] Preview lookup failed:', err);
       res.status(502).json({

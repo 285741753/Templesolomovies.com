@@ -1,12 +1,16 @@
-import { useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   Bookmark,
   CheckCircle2,
+  Disc3,
   Download,
+  ExternalLink,
   Film,
   HardDrive,
   MessageSquare,
+  Music2,
+  Pause,
   Play,
   RotateCcw,
   Search,
@@ -15,7 +19,13 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
+import {
+  buildBoomplaySearchUrl,
+  buildSpotifySearchUrl,
+  MUSIC_GENRES,
+} from '../constants/musicGenres';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useMusicPlayer } from '../contexts/MusicPlayerContext';
 import type { MovieRatingSummary } from '../hooks/useMovieRatings';
 import type {
   Movie,
@@ -79,6 +89,8 @@ const QUALITY_OPTIONS: Array<'All' | MovieQuality> = [
   '720p HD',
 ];
 
+const IMDB_THRESHOLD_OPTIONS = [0, 6, 7, 7.5, 8, 8.5] as const;
+
 function SearchPosterImage({ posterUrl, title }: { posterUrl: string; title: string }) {
   const [failed, setFailed] = useState(false);
 
@@ -106,7 +118,7 @@ function SearchPosterImage({ posterUrl, title }: { posterUrl: string; title: str
   );
 }
 
-export function SearchPage({
+export const SearchPage = memo(function SearchPage({
   movies,
   isOffline,
   searchQuery,
@@ -131,10 +143,31 @@ export function SearchPage({
   onShareToChat,
 }: SearchPageProps) {
   const { t } = useLanguage();
+  const {
+    tracks: musicTracks,
+    currentTrack: activeMusicTrack,
+    isPlaying: isMusicPlaying,
+    isLoadingTracks: isLoadingMusicTracks,
+    selectedGenre: selectedMusicGenre,
+    spotifyStatus,
+    searchTracks: searchMusicTracks,
+    selectGenre: selectMusicGenre,
+    playTrack: playMusicTrack,
+    togglePlayPause: toggleMusicPlayPause,
+  } = useMusicPlayer();
   const [savedOnly, setSavedOnly] = useState(false);
   const [downloadedOnly, setDownloadedOnly] = useState(false);
+  const [minImdbRating, setMinImdbRating] = useState<number>(0);
   const [recentSearches, setRecentSearches] = useState<string[]>(() => loadRecentSearches());
   const [mobileFiltersExpanded, setMobileFiltersExpanded] = useState(true);
+
+  useEffect(() => {
+    if (selectedGenre !== 'Music') return;
+    const timer = window.setTimeout(() => {
+      void searchMusicTracks(searchQuery.trim(), selectedMusicGenre);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [selectedGenre, searchQuery, selectedMusicGenre, searchMusicTracks]);
 
   const queryOutput = useMemo(
     () =>
@@ -143,6 +176,7 @@ export function SearchPage({
           query: searchQuery,
           genre: selectedGenre,
           quality: selectedQuality,
+          minImdbRating,
           sortBy,
           savedOnly,
           savedMovieIds,
@@ -155,6 +189,7 @@ export function SearchPage({
       searchQuery,
       selectedGenre,
       selectedQuality,
+      minImdbRating,
       sortBy,
       savedOnly,
       savedMovieIds,
@@ -172,6 +207,7 @@ export function SearchPage({
     usedLocalIndex,
     genreCounts,
     qualityCounts,
+    ratingThresholdCounts,
   } = queryOutput;
 
   const activeFilterItems = useMemo(() => {
@@ -198,6 +234,13 @@ export function SearchPage({
         id: 'quality',
         label: `Quality: ${selectedQuality}`,
         onClear: () => onSelectQuality('All'),
+      });
+    }
+    if (minImdbRating > 0) {
+      items.push({
+        id: 'minImdbRating',
+        label: `IMDb ≥ ${minImdbRating.toFixed(1)}`,
+        onClear: () => setMinImdbRating(0),
       });
     }
     if (searchQuery.trim()) {
@@ -232,6 +275,7 @@ export function SearchPage({
   }, [
     selectedGenre,
     selectedQuality,
+    minImdbRating,
     searchQuery,
     savedOnly,
     downloadedOnly,
@@ -270,6 +314,7 @@ export function SearchPage({
     onSearchChange('');
     onSelectGenre('All');
     onSelectQuality('All');
+    setMinImdbRating(0);
     onChangeSortBy('relevance');
     setSavedOnly(false);
     setDownloadedOnly(false);
@@ -518,6 +563,57 @@ export function SearchPage({
               </div>
             </div>
 
+            {/* Minimum IMDb Rating Threshold Filter */}
+            <div className="min-w-0">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#A1A1AA]">
+                  <Star className="h-3.5 w-3.5 text-[#E6A93C]" aria-hidden="true" />
+                  <span>Minimum IMDb Rating</span>
+                </span>
+                {minImdbRating > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setMinImdbRating(0)}
+                    className="text-xs font-medium text-[#E6A93C] hover:underline cursor-pointer"
+                  >
+                    Reset rating
+                  </button>
+                )}
+              </div>
+              <div
+                role="group"
+                aria-label="Filter by minimum IMDb rating"
+                className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full"
+              >
+                {IMDB_THRESHOLD_OPTIONS.map((threshold) => {
+                  const active = minImdbRating === threshold;
+                  const count = ratingThresholdCounts[String(threshold)] ?? 0;
+                  return (
+                    <button
+                      key={threshold}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setMinImdbRating(threshold)}
+                      className={`min-h-[44px] inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                        active
+                          ? 'border-[#E6A93C] bg-[#E6A93C] text-[#09090B] font-semibold'
+                          : 'border-[#27272A] bg-[#09090B] text-[#D4D4D8] hover:border-[#3F3F46] hover:text-[#FAFAFA]'
+                      }`}
+                    >
+                      <span>{threshold === 0 ? 'Any Rating' : `${threshold.toFixed(1)}+ IMDb`}</span>
+                      <span
+                        className={`font-mono text-[11px] tabular-nums ${
+                          active ? 'text-[#09090B]/80' : 'text-[#71717A]'
+                        }`}
+                      >
+                        ({count})
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Genre Filter Tabs */}
             <div className="border-t border-[#27272A] pt-3 min-w-0 max-w-full">
               <div
@@ -601,12 +697,182 @@ export function SearchPage({
             {totalCatalogCount === 1 ? t('movieSingular') : t('moviePlural')}
             {selectedGenre !== 'All' ? ` · Genre: ${selectedGenre}` : ''}
             {selectedQuality !== 'All' ? ` · Quality: ${selectedQuality}` : ''}
+            {minImdbRating > 0 ? ` · IMDb ≥ ${minImdbRating.toFixed(1)}` : ''}
             {savedOnly ? ' · Saved' : ''}
             {downloadedOnly ? ' · Offline Ready' : ''}
             {searchQuery.trim() ? ` · “${searchQuery.trim()}”` : ''}
           </p>
         </div>
       </div>
+
+      {/* Music Genre Mode: Direct Spotify & Boomplay Search + Playable Previews */}
+      {selectedGenre === 'Music' && (
+        <div className="mb-7 rounded-2xl border border-[#E5A93B]/35 bg-[#111114] p-4 sm:p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-xs font-medium text-[#E5A93B]">
+                <Music2 className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Music Genre Search · Spotify &amp; Boomplay</span>
+              </div>
+              <h2 className="font-display text-lg font-bold text-[#FAFAFA] mt-0.5">
+                {searchQuery.trim()
+                  ? `Music results for “${searchQuery.trim()}”`
+                  : `${selectedMusicGenre === 'All' ? 'All Music Genres' : selectedMusicGenre} Tracks`}
+              </h2>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <a
+                href={buildSpotifySearchUrl(searchQuery, selectedMusicGenre)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/45 bg-emerald-500/15 px-4 py-2 text-xs font-bold text-emerald-300 hover:bg-emerald-500/25 transition-colors whitespace-nowrap"
+              >
+                <span>Search on Spotify</span>
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+              </a>
+              <a
+                href={buildBoomplaySearchUrl(searchQuery, selectedMusicGenre)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-[#E5A93B]/45 bg-[#E5A93B]/15 px-4 py-2 text-xs font-bold text-[#E5A93B] hover:bg-[#E5A93B]/25 transition-colors whitespace-nowrap"
+              >
+                <span>Search on Boomplay</span>
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+              </a>
+            </div>
+          </div>
+
+          <div
+            role="tablist"
+            aria-label="Music sub-genres"
+            className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5"
+          >
+            {MUSIC_GENRES.map((genre) => {
+              const active = selectedMusicGenre === genre.id;
+              return (
+                <button
+                  key={genre.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => void selectMusicGenre(genre.id, searchQuery.trim())}
+                  className={`min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    active
+                      ? 'border-[#E5A93B] bg-[#E5A93B] text-[#09090B]'
+                      : 'border-[#27272A] bg-[#09090B] text-[#D4D4D8] hover:border-[#E5A93B]/70 hover:text-[#FAFAFA]'
+                  }`}
+                >
+                  <Disc3 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>{genre.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {isLoadingMusicTracks && musicTracks.length === 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {[1, 2, 3, 4].map((idx) => (
+                <div
+                  key={idx}
+                  className="h-24 rounded-xl border border-[#27272A] bg-[#09090B] animate-pulse"
+                />
+              ))}
+            </div>
+          ) : musicTracks.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {musicTracks.slice(0, 8).map((track) => {
+                const isActive = activeMusicTrack?.id === track.id;
+                const isThisPlaying = isActive && isMusicPlaying;
+                return (
+                  <article
+                    key={track.id}
+                    className={`flex flex-col justify-between gap-2.5 rounded-xl border p-3 transition-colors ${
+                      isActive
+                        ? 'border-[#E5A93B] bg-[#14120D]'
+                        : 'border-[#27272A] bg-[#09090B] hover:border-[#3F3F46]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {track.artworkUrl ? (
+                        <img
+                          src={track.artworkUrl}
+                          alt={`${track.title} cover`}
+                          loading="lazy"
+                          decoding="async"
+                          className="h-12 w-12 rounded-lg border border-[#27272A] object-cover shrink-0"
+                        />
+                      ) : (
+                        <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-[#27272A] bg-[#18181B] shrink-0">
+                          <Music2 className="h-4 w-4 text-[#E5A93B]" aria-hidden="true" />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <h3 className="text-xs font-semibold text-[#FAFAFA] truncate">{track.title}</h3>
+                        <p className="text-[11px] text-[#A1A1AA] truncate">{track.artist}</p>
+                        <p className="text-[10px] font-mono text-[#71717A] truncate">
+                          {track.genre || 'Music'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1.5 pt-2 border-t border-[#27272A]/80">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isActive) {
+                            void toggleMusicPlayPause();
+                          } else {
+                            void playMusicTrack(track, musicTracks);
+                          }
+                        }}
+                        className="min-h-[40px] inline-flex items-center gap-1 rounded-lg bg-[#E5A93B] px-3 py-1.5 text-[11px] font-bold text-[#09090B] hover:bg-[#F0B84F] whitespace-nowrap cursor-pointer"
+                      >
+                        {isThisPlaying ? (
+                          <>
+                            <Pause className="h-3 w-3 fill-current" aria-hidden="true" />
+                            <span>Pause</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-3 w-3 fill-current" aria-hidden="true" />
+                            <span>
+                              {track.spotifyUri && spotifyStatus.isPremium ? 'Play' : '30s Preview'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <a
+                          href={track.spotifyUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="min-h-[40px] inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
+                        >
+                          <span>Spotify</span>
+                        </a>
+                        <a
+                          href={track.boomplayUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="min-h-[40px] inline-flex items-center gap-1 rounded-lg border border-[#E5A93B]/40 bg-[#E5A93B]/10 px-2 py-1 text-[11px] font-medium text-[#E5A93B] hover:bg-[#E5A93B]/20"
+                        >
+                          <span>Boomplay</span>
+                        </a>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-[#A1A1AA]">
+              Use Search on Spotify or Search on Boomplay above to explore more tracks in this genre.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Results Grid or Empty State */}
       {results.length === 0 ? (
@@ -692,10 +958,10 @@ export function SearchPage({
                         ? `Remove ${movie.title} from watchlist`
                         : `Save ${movie.title} to watchlist`
                     }
-                    className={`absolute top-3 right-3 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl backdrop-blur-sm border transition-colors cursor-pointer ${
+                    className={`absolute top-3 right-3 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border transition-colors cursor-pointer ${
                       isSaved
                         ? 'bg-[#E6A93C] border-[#E6A93C] text-[#09090B]'
-                        : 'bg-[#09090B]/75 border-[#27272A] text-[#FAFAFA] hover:border-[#E6A93C]'
+                        : 'bg-[#09090B]/85 border-[#27272A] text-[#FAFAFA] hover:border-[#E6A93C]'
                     }`}
                   >
                     <Bookmark
@@ -849,4 +1115,4 @@ export function SearchPage({
       )}
     </section>
   );
-}
+});

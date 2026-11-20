@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -19,7 +20,7 @@ function formatClock(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-export function MusicPlayerBar() {
+export const MusicPlayerBar = memo(function MusicPlayerBar() {
   const {
     tracks,
     currentTrack,
@@ -53,7 +54,7 @@ export function MusicPlayerBar() {
       {/* Fixed Mini Player above mobile BottomNavBar with env(safe-area-inset-bottom) */}
       <aside
         aria-label="Music Mini Player"
-        className="fixed left-2 right-2 bottom-[calc(4.25rem+env(safe-area-inset-bottom))] lg:left-auto lg:right-5 lg:bottom-5 lg:w-[410px] z-30 rounded-2xl border border-[#E5A93B]/45 bg-[#09090B]/95 backdrop-blur-md shadow-2xl overflow-hidden touch-manipulation"
+        className="fixed left-2 right-2 bottom-[calc(4.25rem+env(safe-area-inset-bottom))] lg:left-auto lg:right-5 lg:bottom-5 lg:w-[410px] z-30 rounded-2xl border border-[#E5A93B]/45 bg-[#09090B]/98 lg:backdrop-blur-md shadow-2xl overflow-hidden touch-manipulation"
       >
         {/* Top Progress Line */}
         <div className="h-1 w-full bg-[#27272A]">
@@ -385,4 +386,4 @@ export function MusicPlayerBar() {
       )}
     </>
   );
-}
+});

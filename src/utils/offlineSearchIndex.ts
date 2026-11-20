@@ -18,6 +18,7 @@ export interface OfflineSearchFilters {
   query?: string;
   genre?: 'All' | MovieGenre;
   quality?: 'All' | MovieQuality;
+  minImdbRating?: number;
   sortBy?: SearchSortOrder;
   savedOnly?: boolean;
   savedMovieIds?: Set<string>;
@@ -34,6 +35,7 @@ export interface OfflineSearchQueryResult {
   scores: Map<string, number>;
   genreCounts: Record<string, number>;
   qualityCounts: Record<string, number>;
+  ratingThresholdCounts: Record<string, number>;
 }
 
 export interface OfflineIndexedDoc {
@@ -178,6 +180,9 @@ export function buildAndSaveOfflineSearchIndex(movies: Movie[]): OfflineSearchIn
     tokens,
   };
 
+  cachedOfflineIndex = payload;
+  cachedHydratedMovies = null;
+
   try {
     window.localStorage.setItem(OFFLINE_SEARCH_INDEX_KEY, JSON.stringify(payload));
   } catch {
@@ -187,9 +192,12 @@ export function buildAndSaveOfflineSearchIndex(movies: Movie[]): OfflineSearchIn
       for (const [id, d] of Object.entries(docs)) {
         compactDocs[id] = { ...d, synopsis: d.synopsis.slice(0, 140) };
       }
+      const compactPayload = { ...payload, docs: compactDocs };
+      cachedOfflineIndex = compactPayload;
+      cachedHydratedMovies = null;
       window.localStorage.setItem(
         OFFLINE_SEARCH_INDEX_KEY,
-        JSON.stringify({ ...payload, docs: compactDocs })
+        JSON.stringify(compactPayload)
       );
     } catch {
       // Ignore unrecoverable storage quota limits
@@ -199,11 +207,20 @@ export function buildAndSaveOfflineSearchIndex(movies: Movie[]): OfflineSearchIn
   return payload;
 }
 
+let cachedOfflineIndex: OfflineSearchIndexPayload | null | undefined;
+let cachedHydratedMovies: Movie[] | null = null;
+
 export function loadOfflineSearchIndex(): OfflineSearchIndexPayload | null {
   if (typeof window === 'undefined') return null;
+  if (cachedOfflineIndex !== undefined) {
+    return cachedOfflineIndex;
+  }
   try {
     const raw = window.localStorage.getItem(OFFLINE_SEARCH_INDEX_KEY);
-    if (!raw) return null;
+    if (!raw) {
+      cachedOfflineIndex = null;
+      return null;
+    }
     const parsed = JSON.parse(raw) as Partial<OfflineSearchIndexPayload>;
     if (
       parsed.version !== 1 ||
@@ -212,10 +229,13 @@ export function loadOfflineSearchIndex(): OfflineSearchIndexPayload | null {
       !parsed.tokens ||
       typeof parsed.tokens !== 'object'
     ) {
+      cachedOfflineIndex = null;
       return null;
     }
-    return parsed as OfflineSearchIndexPayload;
+    cachedOfflineIndex = parsed as OfflineSearchIndexPayload;
+    return cachedOfflineIndex;
   } catch {
+    cachedOfflineIndex = null;
     return null;
   }
 }
@@ -230,9 +250,15 @@ export function getOfflineIndexStats(): { indexedCount: number; updatedAt: numbe
 }
 
 export function hydrateMoviesFromOfflineIndex(): Movie[] {
+  if (cachedHydratedMovies !== null) {
+    return cachedHydratedMovies;
+  }
   const index = loadOfflineSearchIndex();
-  if (!index) return [];
-  return Object.values(index.docs).map((doc) =>
+  if (!index) {
+    cachedHydratedMovies = [];
+    return cachedHydratedMovies;
+  }
+  cachedHydratedMovies = Object.values(index.docs).map((doc) =>
     enrichMovie({
       id: doc.id,
       title: doc.title,
@@ -261,6 +287,7 @@ export function hydrateMoviesFromOfflineIndex(): Movie[] {
       createdAt: doc.createdAt,
     })
   );
+  return cachedHydratedMovies;
 }
 
 export function searchOfflineIndex(
@@ -376,6 +403,8 @@ function matchesGenreFilter(movie: Movie, genre: 'All' | MovieGenre): boolean {
   return movieHasGenre(movie, genre);
 }
 
+const KNOWN_IMDB_THRESHOLDS = [0, 6, 7, 7.5, 8, 8.5] as const;
+
 export function queryCachedOfflineMovies(
   filters: OfflineSearchFilters,
   liveMovies: Movie[] = []
@@ -384,6 +413,7 @@ export function queryCachedOfflineMovies(
     query = '',
     genre = 'All',
     quality = 'All',
+    minImdbRating = 0,
     sortBy = 'relevance',
     savedOnly = false,
     savedMovieIds,
@@ -411,12 +441,32 @@ export function queryCachedOfflineMovies(
   const textSearch = searchOfflineIndex(cleanQuery, sourceCatalog);
 
   // Scope first by text query and collection toggles so facet counts remain accurate
-  const baseScoped = sourceCatalog.filter((movie) => {
+  const preRatingScoped = sourceCatalog.filter((movie) => {
     if (savedOnly && savedMovieIds && !savedMovieIds.has(movie.id)) return false;
     if (downloadedOnly && downloadedMovieIds && !downloadedMovieIds.has(movie.id)) return false;
     if (cleanQuery && !textSearch.matchedIds.has(movie.id)) return false;
     return true;
   });
+
+  const ratingThresholdCounts: Record<string, number> = {};
+  for (const threshold of KNOWN_IMDB_THRESHOLDS) {
+    ratingThresholdCounts[String(threshold)] = 0;
+  }
+  for (const movie of preRatingScoped) {
+    if (!matchesGenreFilter(movie, genre)) continue;
+    if (quality !== 'All' && movie.quality !== quality) continue;
+    const rating = movie.imdbRating ?? 7.8;
+    for (const threshold of KNOWN_IMDB_THRESHOLDS) {
+      if (threshold === 0 || rating >= threshold) {
+        ratingThresholdCounts[String(threshold)] += 1;
+      }
+    }
+  }
+
+  const baseScoped =
+    minImdbRating > 0
+      ? preRatingScoped.filter((movie) => (movie.imdbRating ?? 7.8) >= minImdbRating)
+      : preRatingScoped;
 
   const genreCounts: Record<string, number> = { All: 0 };
   for (const g of KNOWN_GENRES) {
@@ -485,6 +535,7 @@ export function queryCachedOfflineMovies(
     scores: textSearch.scores,
     genreCounts,
     qualityCounts,
+    ratingThresholdCounts,
   };
 }
 
